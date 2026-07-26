@@ -1,0 +1,45 @@
+[package]
+name = "routefuel"
+version = "0.6.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1.40", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace", "cors", "timeout", "compression-br"] }
+hyper = "1.4"
+tiktoken-rs = "0.5"
+
+sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "postgres", "macros", "chrono", "uuid"] }
+pgvector = { version = "=0.4.1", features = ["sqlx"] }
+
+governor = "0.6"
+async-trait = "0.1"
+dashmap = "5.5"
+futures = "0.3"
+parking_lot = "0.12"
+thiserror = "1.0"
+lazy_static = "1.5"
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+dotenv = "0.15"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+sha2 = "0.10"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1.0"
+
+async-stream = "0.3"
+futures-util = "0.3"
+tokio-stream = "0.1"
+
+ort = { version = "2.0.0-rc.9", features = ["download-binaries"] }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+
+[[bin]]
+name = "routefuel"
+path = "src/main.rs"

@@ -1,14 +1,14 @@
-# RouteFuel
+# RouterFuel
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-A BYOK (Bring Your Own Key) AI gateway written in Rust. RouteFuel sits between your app and the LLM providers you already have keys for — Anthropic, OpenAI, Gemini, DeepSeek, xAI, Mistral, Qwen, Moonshot, Zhipu, Meta, and OpenRouter as a universal fallback — and adds the routing, cost tracking, caching, and safety nets you'd otherwise have to build yourself.
+A BYOK (Bring Your Own Key) AI gateway written in Rust. RouterFuel sits between your app and the LLM providers you already have keys for — Anthropic, OpenAI, Gemini, DeepSeek, xAI, Mistral, Qwen, Moonshot, Zhipu, Meta, and OpenRouter as a universal fallback — and adds the routing, cost tracking, caching, and safety nets you'd otherwise have to build yourself.
 
-RouteFuel never holds a billable key of its own. Every request is billed to *your* provider account, using *your* key. RouteFuel's job is just to route it well, cache it when it can, and tell you what it cost.
+RouterFuel never holds a billable key of its own. Every request is billed to *your* provider account, using *your* key. RouterFuel's job is just to route it well, cache it when it can, and tell you what it cost.
 
 ## Features
 
-- **Smart routing** — pick a model by name, let RouteFuel auto-select on cost/latency/quality, or route by task type (`task:summarize`, `task:code`, etc.)
+- **Smart routing** — pick a model by name, let RouterFuel auto-select on cost/latency/quality, or route by task type (`task:summarize`, `task:code`, etc.)
 - **BYOK across 11 providers** — supply your own key per provider via request headers; OpenRouter acts as a universal fallback if that's the only key you have
 - **Vision support** — send images (URL or base64) to any vision-capable model in the registry
 - **Semantic caching** — a local ONNX embedding model (no external API cost) matches semantically similar prompts and serves cached responses instead of re-calling a provider
@@ -25,7 +25,7 @@ RouteFuel never holds a billable key of its own. Every request is billed to *you
 
 - Rust (2021 edition)
 - PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector) extension installed
-- A local ONNX sentence-embedding model + tokenizer (e.g. [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)) for semantic caching — download the `.onnx` and `tokenizer.json` files and point RouteFuel at them (see below)
+- A local ONNX sentence-embedding model + tokenizer (e.g. [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)) for semantic caching — download the `.onnx` and `tokenizer.json` files and point RouterFuel at them (see below)
 
 ## Setup
 
@@ -52,9 +52,9 @@ Migrations run automatically on startup too, via `sqlx::migrate!` in `main.rs`.
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `DATABASE_URL` | yes | — | Postgres connection string |
-| `ROUTEFUEL_API_KEYS` | no | empty | Client API keys, format `sha256hex:ClientName,sha256hex:ClientName` |
-| `ROUTEFUEL_CLIENT_TIERS` | no | empty | Per-client rate tiers, format `raw_key:pro,raw_key:enterprise` |
-| `ROUTEFUEL_ADMIN_KEY` | no | empty | Key required to access `/admin/*` endpoints |
+| `ROUTERFUEL_API_KEYS` | no | empty | Client API keys, format `sha256hex:ClientName,sha256hex:ClientName` |
+| `ROUTERFUEL_CLIENT_TIERS` | no | empty | Per-client rate tiers, format `raw_key:pro,raw_key:enterprise` |
+| `ROUTERFUEL_ADMIN_KEY` | no | empty | Key required to access `/admin/*` endpoints |
 | `EMBEDDING_MODEL_PATH` | no | — | Path to your local ONNX embedding model (enables semantic cache) |
 | `EMBEDDING_TOKENIZER_PATH` | no | — | Path to the matching tokenizer.json |
 | `LOOP_GUARD_REPEAT_THRESHOLD` | no | 4 | Repeats of an identical prompt before it's flagged as a loop |
@@ -68,7 +68,7 @@ Migrations run automatically on startup too, via `sqlx::migrate!` in `main.rs`.
 | `HOST` | no | `0.0.0.0` | Bind address |
 | `PORT` | no | `3000` | Bind port |
 
-To generate an API key hash for `ROUTEFUEL_API_KEYS`:
+To generate an API key hash for `ROUTERFUEL_API_KEYS`:
 
 ```bash
 echo -n "rf_live_yoursecretkey" | sha256sum | awk '{print $1}'
@@ -80,7 +80,7 @@ echo -n "rf_live_yoursecretkey" | sha256sum | awk '{print $1}'
 cargo run --release
 ```
 
-RouteFuel is now listening on `http://localhost:3000` (or whatever `HOST`/`PORT` you set).
+RouterFuel is now listening on `http://localhost:3000` (or whatever `HOST`/`PORT` you set).
 
 See [USAGE.md](USAGE.md) for how to actually call it.
 

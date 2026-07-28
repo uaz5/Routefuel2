@@ -1,10 +1,10 @@
-# Using RouteFuel
+# Using RouterFuel
 
-This assumes RouteFuel is already running (see [README.md](README.md) for setup). Everything below assumes it's reachable at `http://localhost:3000` — swap in your real host.
+This assumes RouterFuel is already running (see [README.md](README.md) for setup). Everything below assumes it's reachable at `http://localhost:3000` — swap in your real host.
 
 ## 1. Authenticate
 
-Every request needs a RouteFuel API key in the `X-API-Key` header. This is *not* the same as your OpenAI/Anthropic/etc. key — it's a key you issue yourself via `ROUTEFUEL_API_KEYS`.
+Every request needs a RouterFuel API key in the `X-API-Key` header. This is *not* the same as your OpenAI/Anthropic/etc. key — it's a key you issue yourself via `ROUTERFUEL_API_KEYS`.
 
 ```bash
 curl http://localhost:3000/health
@@ -19,7 +19,7 @@ An invalid or missing key returns `401 Unauthorized`.
 
 ## 2. Bring your own provider key(s)
 
-RouteFuel doesn't hold billable provider keys — you supply yours as headers on each request. Only supply the header(s) for the provider(s) you want to use:
+RouterFuel doesn't hold billable provider keys — you supply yours as headers on each request. Only supply the header(s) for the provider(s) you want to use:
 
 | Provider | Header |
 |---|---|
@@ -35,7 +35,7 @@ RouteFuel doesn't hold billable provider keys — you supply yours as headers on
 | Meta / Llama | `X-Meta-API-Key` (or `X-Llama-API-Key`) |
 | OpenRouter | `X-OpenRouter-API-Key` |
 
-If you only have an OpenRouter key, RouteFuel will route *any* model through OpenRouter automatically — you don't need a separate key per lab.
+If you only have an OpenRouter key, RouterFuel will route *any* model through OpenRouter automatically — you don't need a separate key per lab.
 
 ## 3. Send a chat completion
 
@@ -68,8 +68,8 @@ The response shape matches the OpenAI chat completions format:
 The `model` field accepts three forms:
 
 - **A specific model ID** — e.g. `"claude-sonnet-5"`, `"gpt-5.6-sol"` — routes directly to that model/provider
-- **`"auto"`** — RouteFuel picks the best model for you based on cost, latency, and quality, balanced by default
-- **`"task:<name>"`** — routes based on task type, e.g. `"task:summarize"`, `"task:code"` — RouteFuel picks whichever registered model is best suited to that task
+- **`"auto"`** — RouterFuel picks the best model for you based on cost, latency, and quality, balanced by default
+- **`"task:<name>"`** — routes based on task type, e.g. `"task:summarize"`, `"task:code"` — RouterFuel picks whichever registered model is best suited to that task
 
 ### Sending images (vision)
 
@@ -96,7 +96,7 @@ Or inline base64:
 { "type": "image_url", "image_url": { "url": "data:image/jpeg;base64,<...>" } }
 ```
 
-If you use `"model": "auto"` or `"model": "task:..."`, RouteFuel automatically routes image-carrying requests to a vision-capable model. If you pin a specific model that doesn't support vision, you'll get a `400` telling you so — check `GET /v1/models` for which models support images.
+If you use `"model": "auto"` or `"model": "task:..."`, RouterFuel automatically routes image-carrying requests to a vision-capable model. If you pin a specific model that doesn't support vision, you'll get a `400` telling you so — check `GET /v1/models` for which models support images.
 
 ### Streaming
 
@@ -139,7 +139,7 @@ The comparison (cost delta, latency delta, output length) lands in the `shadow_c
 
 ### Admin dashboard
 
-These require `X-API-Key` set to your `ROUTEFUEL_ADMIN_KEY`:
+These require `X-API-Key` set to your `ROUTERFUEL_ADMIN_KEY`:
 
 | Endpoint | Purpose |
 |---|---|
@@ -161,11 +161,11 @@ curl "http://localhost:3000/admin/overview?start=2026-07-01&end=2026-07-27" \
 
 ## 5. Rate limits
 
-Each client is assigned a tier — `free`, `pro`, or `enterprise` — via `ROUTEFUEL_CLIENT_TIERS` or the `client_tiers` Postgres table. A client with no explicit tier gets whatever the server's default is (falls back to `pro`). Exceeding your tier's requests-per-second returns `429`.
+Each client is assigned a tier — `free`, `pro`, or `enterprise` — via `ROUTERFUEL_CLIENT_TIERS` or the `client_tiers` Postgres table. A client with no explicit tier gets whatever the server's default is (falls back to `pro`). Exceeding your tier's requests-per-second returns `429`.
 
 ## 6. Troubleshooting
 
-- **`401 Unauthorized`** — check your `X-API-Key` header is set and matches a hash in `ROUTEFUEL_API_KEYS`
+- **`401 Unauthorized`** — check your `X-API-Key` header is set and matches a hash in `ROUTERFUEL_API_KEYS`
 - **`429 Too Many Requests`** — you've hit your tier's rate limit; wait or ask for a tier upgrade
 - **`400` on an image request** — the model you pinned doesn't support vision; use `"model": "auto"` or check `/v1/models`
 - **Slow first request** — the local embedding model and OpenRouter catalog fetch happen at startup, not per-request, so this shouldn't recur

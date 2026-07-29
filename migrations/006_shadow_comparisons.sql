@@ -1,7 +1,7 @@
 -- ============================================================================
--- 006_shadow_comparisons.sql — RouteFuel v0.8
+-- 006_shadow_comparisons.sql — RouterFuel v0.8
 --
--- Shadow mode: when a client sets `shadow_model` on a request, RouteFuel
+-- Shadow mode: when a client sets `shadow_model` on a request, RouterFuel
 -- fires an identical call at that model *in addition to* the normally-
 -- routed one, purely for comparison — the client only ever sees the primary
 -- response. This table is where those comparisons land. See

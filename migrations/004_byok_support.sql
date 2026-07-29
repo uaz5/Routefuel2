@@ -1,5 +1,5 @@
 -- =============================================================================
--- migrations/004_byok_support.sql — RouteFuel v0.5
+-- migrations/004_byok_support.sql — RouterFuel v0.5
 -- Adds is_byok column to track custom key requests vs gateway-billed requests
 -- =============================================================================
 

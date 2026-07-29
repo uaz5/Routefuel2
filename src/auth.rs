@@ -151,7 +151,7 @@ impl ApiKeyStore {
                 }
                 None => {
                     tracing::error!(
-                        "Malformed ROUTEFUEL_API_KEYS entry '{}' — expected 'sha256hex:ClientName'",
+                        "Malformed ROUTERFUEL_API_KEYS entry '{}' — expected 'sha256hex:ClientName'",
                         entry
                     );
                 }
@@ -230,7 +230,7 @@ pub async fn api_key_middleware(
 
             // Inject client ID so handlers can use it without re-hashing
             request.headers_mut().insert(
-                "x-routefuel-client-id",
+                "x-routerfuel-client-id",
                 client_name
                     .parse()
                     .unwrap_or_else(|_| "unknown".parse().unwrap()),

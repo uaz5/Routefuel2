@@ -1,13 +1,13 @@
 // ============================================================================
-// src/route_engine.rs — RouteFuel v0.6 — accurate as of July 24, 2026
+// src/route_engine.rs — RouterFuel v0.6 — accurate as of July 24, 2026
 //
-// Registry covers every major lab RouteFuel supports, direct + via OpenRouter:
+// Registry covers every major lab RouterFuel supports, direct + via OpenRouter:
 //   Anthropic, OpenAI, Google Gemini, xAI (Grok), DeepSeek (incl. open-weight),
 //   Mistral, Alibaba Qwen, Moonshot (Kimi), Zhipu (GLM), Meta (Llama).
 //
 // Pricing/context/latency figures are the best public numbers available at
 // write time and drift constantly — treat cost_per_1m_* as the routing
-// signal it is, not a billing source of truth. RouteFuel is pure BYOK: it
+// signal it is, not a billing source of truth. RouterFuel is pure BYOK: it
 // never pays a provider bill itself, so a stale price here only skews which
 // model gets picked, not what anyone is actually charged (providers bill the
 // client's own key directly).
@@ -57,7 +57,7 @@ pub struct RoutingDecision {
 }
 
 /// Tasks your meeting-assistant product exposes to callers.
-/// Callers send `"task": "summarise"` — RouteFuel picks the model.
+/// Callers send `"task": "summarise"` — RouterFuel picks the model.
 #[derive(Debug, Clone, Copy)]
 pub enum MeetingTask {
     Summarise,
@@ -122,7 +122,7 @@ impl RouteEngine {
         }
     }
 
-    /// Master registry — every model RouteFuel knows how to route to,
+    /// Master registry — every model RouterFuel knows how to route to,
     /// as of July 2026. Cost figures are USD cents per 1M tokens.
     fn build_registry() -> Vec<ModelConfig> {
         vec![

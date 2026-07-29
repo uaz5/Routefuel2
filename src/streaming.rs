@@ -1,5 +1,5 @@
 // =============================================================================
-// src/streaming.rs  — RouteFuel v0.7 (FIXED)
+// src/streaming.rs  — RouterFuel v0.7 (FIXED)
 // =============================================================================
 
 use crate::concurrency::ConcurrencyLimiter;

@@ -46,7 +46,7 @@ pub struct AdminState {
 }
  
 // =============================================================================
-// Admin auth — a single shared secret (ROUTEFUEL_ADMIN_KEY), not the
+// Admin auth — a single shared secret (ROUTERFUEL_ADMIN_KEY), not the
 // per-client BYOK/auth keys in auth.rs. Deliberately separate: a client key
 // should never be able to see every other client's spend.
 // =============================================================================
@@ -57,11 +57,11 @@ pub async fn admin_key_middleware(
     next: Next,
 ) -> Response {
     if admin_key.is_empty() {
-        warn!("ROUTEFUEL_ADMIN_KEY is not set — admin routes are disabled");
+        warn!("ROUTERFUEL_ADMIN_KEY is not set — admin routes are disabled");
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({
-                "error": "Admin dashboard is disabled: set ROUTEFUEL_ADMIN_KEY to enable it."
+                "error": "Admin dashboard is disabled: set ROUTERFUEL_ADMIN_KEY to enable it."
             })),
         )
             .into_response();

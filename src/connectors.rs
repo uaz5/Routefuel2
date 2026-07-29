@@ -1,8 +1,8 @@
 // ============================================================================
-// src/connectors.rs — RouteFuel v0.6
+// src/connectors.rs — RouterFuel v0.6
 //
 // STRICT BYOK MODEL:
-//   RouteFuel never holds a paid provider API key of its own. Every request
+//   RouterFuel never holds a paid provider API key of its own. Every request
 //   is billed directly to the *client's* provider account. `complete()` takes
 //   `client_api_key: &str` (not Option<&str>) — there is no gateway-key
 //   fallback path. If the client hasn't supplied a key for the selected
@@ -136,8 +136,8 @@ pub struct ChatCompletionRequest {
     pub top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
-    /// RouteFuel-only field, never forwarded to a provider (see `skip_serializing`
-    /// below) — if set, RouteFuel fires an identical request at this model
+    /// RouterFuel-only field, never forwarded to a provider (see `skip_serializing`
+    /// below) — if set, RouterFuel fires an identical request at this model
     /// *in addition to* the normally-routed one, purely for comparison. The
     /// client only ever sees the primary response; the shadow call's cost,
     /// latency, and output are logged to the `shadow_comparisons` table.
@@ -197,7 +197,7 @@ pub struct ConnectorResult {
 
 #[async_trait]
 pub trait Connector: Send + Sync {
-    /// `client_api_key` is mandatory — RouteFuel holds no keys of its own.
+    /// `client_api_key` is mandatory — RouterFuel holds no keys of its own.
     async fn complete(
         &self,
         req: &ChatCompletionRequest,
@@ -275,7 +275,7 @@ impl Connector for GenericOpenAICompatibleConnector {
 const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VER: &str = "2023-06-01";
 
-/// Base completion URL for every provider RouteFuel talks to directly.
+/// Base completion URL for every provider RouterFuel talks to directly.
 /// Centralized here so streaming.rs and ConnectorManager::new() can't drift
 /// out of sync with each other.
 pub fn provider_base_url(provider: Provider) -> &'static str {
@@ -505,7 +505,7 @@ struct GeminiResp {
     usage_metadata: Option<GeminiUsageMetadata>,
 }
 
-/// Translate a RouteFuel `ChatCompletionRequest` into Gemini's wire format.
+/// Translate a RouterFuel `ChatCompletionRequest` into Gemini's wire format.
 /// Shared by `GeminiConnector::complete` (non-streaming) and
 /// `streaming::stream_handler` (SSE) so the translation lives in one place.
 pub fn to_gemini_body(req: &ChatCompletionRequest) -> serde_json::Value {
@@ -742,8 +742,8 @@ impl ConnectorManager {
                 cb,
             )
             .with_extra_headers(vec![
-                ("HTTP-Referer", "https://routefuel.dev"),
-                ("X-Title", "RouteFuel"),
+                ("HTTP-Referer", "https://routerfuel.com"),
+                ("X-Title", "RouterFuel"),
             ]),
         }
     }

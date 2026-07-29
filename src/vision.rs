@@ -1,5 +1,5 @@
 // =============================================================================
-// src/vision.rs  — RouteFuel v0.6
+// src/vision.rs  — RouterFuel v0.6
 //
 // Vision / Multimodal Support
 //

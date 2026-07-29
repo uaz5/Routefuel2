@@ -1,5 +1,5 @@
 // ============================================================================
-// src/rate_limiter.rs — RouteFuel v0.7
+// src/rate_limiter.rs — RouterFuel v0.7
 //
 // Tier-based rate limiting for clients, with a real registry backing it.
 //
@@ -7,7 +7,7 @@
 // with a fixed `UserTier::Pro` for every client — there was no way to
 // actually assign different clients different tiers without a redeploy.
 // `TierConfig` + `register()`/`status()` here is what `client_registry.rs`
-// wires up (from the ROUTEFUEL_CLIENT_TIERS env var and/or the
+// wires up (from the ROUTERFUEL_CLIENT_TIERS env var and/or the
 // `client_tiers` Postgres table), so a client's rate limit now comes from
 // that registry, defaulting to `default_tier` for anyone not explicitly
 // registered.

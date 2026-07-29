@@ -1,6 +1,6 @@
 // ============================================================================
 // src/main.rs
-// RouteFuel production server — pure BYOK, zero gateway-side provider spend
+// RouterFuel production server — pure BYOK, zero gateway-side provider spend
 // ============================================================================
 
 mod admin;
@@ -155,9 +155,9 @@ impl IntoResponse for ApiError {
 // ============================================================================
 // BYOK RESOLUTION
 //
-// RouteFuel never holds a paid provider key of its own. Every call must be
+// RouterFuel never holds a paid provider key of its own. Every call must be
 // billed to the client's own account:
-//   1. Client supplied a key for the exact provider RouteFuel selected → use it.
+//   1. Client supplied a key for the exact provider RouterFuel selected → use it.
 //   2. Client didn't, but supplied an OpenRouter key → re-route the SAME
 //      model through OpenRouter (model id becomes "<vendor>/<model>"), still
 //      billed entirely to the client.
@@ -201,7 +201,7 @@ fn resolve_byok_route(
     }
 
     Err(ApiError::BadRequest(format!(
-        "No API key supplied for provider '{selected_provider}'. RouteFuel is fully bring-your-own-key: \
+        "No API key supplied for provider '{selected_provider}'. RouterFuel is fully bring-your-own-key: \
          it never bills its own account for provider calls. Supply your key via the \
          X-{selected_provider}-Api-Key header, or supply an X-Openrouter-Api-Key to route this model \
          through OpenRouter instead."
@@ -233,7 +233,7 @@ async fn chat_completions_handler(
 async fn handle_streaming(headers: HeaderMap, state: AppState, request: ChatCompletionRequest) -> Response {
     let request_id = Uuid::new_v4().to_string();
     let client_id = headers
-        .get("x-routefuel-client-id")
+        .get("x-routerfuel-client-id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
     let rl_key = client_id.clone().unwrap_or_else(|| "anonymous".to_string());
@@ -286,7 +286,7 @@ async fn handle_streaming(headers: HeaderMap, state: AppState, request: ChatComp
         byok.api_key.clone(),
         effective_request,
         client_id,
-        true, // is_byok — RouteFuel is BYOK-only, see resolve_byok_route
+        true, // is_byok — RouterFuel is BYOK-only, see resolve_byok_route
         Arc::clone(&state.route_engine),
         Arc::clone(&state.cost_tracker),
         reqwest::Client::new(),
@@ -301,7 +301,7 @@ async fn handle_streaming(headers: HeaderMap, state: AppState, request: ChatComp
 ///   - "auto"                                                → best model by
 ///     balanced cost/latency/quality score, given the real input token count
 ///   - "task:<name>", e.g. "task:summarise"                  → the model
-///     RouteFuel has pre-selected as best-fit for that task (see
+///     RouterFuel has pre-selected as best-fit for that task (see
 ///     route_engine::MeetingTask and RouteEngine::select_for_task)
 fn resolve_model(
     state: &AppState,
@@ -361,7 +361,7 @@ fn resolve_model(
             if !model.supports_vision {
                 return Err(ApiError::BadRequest(format!(
                     "Model '{}' does not support image input. Use \"model\": \"auto\" to let \
-                     RouteFuel pick a vision-capable model, or choose one directly (see GET /v1/models \
+                     RouterFuel pick a vision-capable model, or choose one directly (see GET /v1/models \
                      for supports_vision).",
                     request.model
                 )));
@@ -389,7 +389,7 @@ async fn handle_non_streaming(
 
     // Extract authenticated client ID injected by auth middleware
     let client_id = headers
-        .get("x-routefuel-client-id")
+        .get("x-routerfuel-client-id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
@@ -508,7 +508,7 @@ async fn handle_non_streaming(
     let mut effective_request = request.clone();
     effective_request.model = byok.model_id_to_send.clone();
 
-    // Bounded concurrency (src/concurrency.rs) — waits here if RouteFuel is
+    // Bounded concurrency (src/concurrency.rs) — waits here if RouterFuel is
     // already at MAX_CONCURRENT_PROVIDER_CALLS in-flight requests, instead
     // of firing an unbounded number of simultaneous provider connections.
     let _permit = state.concurrency_limiter.acquire().await;
@@ -581,7 +581,7 @@ async fn handle_non_streaming(
 
     // ========================================================================
     // STEP 5: CALCULATE COST WITH PRECISE TOKENS
-    // (RouteFuel never pays this — it's billed to the client's own BYOK key.
+    // (RouterFuel never pays this — it's billed to the client's own BYOK key.
     // We still track it for the client's own audit/savings dashboard.)
     // ========================================================================
 
@@ -612,7 +612,7 @@ async fn handle_non_streaming(
         cost_saved_cents = cost_saved,
         savings_pct = savings_pct,
         used_openrouter_fallback = byok.used_openrouter_fallback,
-        "Calculated costs (billed to client's own BYOK key, not RouteFuel)"
+        "Calculated costs (billed to client's own BYOK key, not RouterFuel)"
     );
 
     state.spend_guard.record_spend(&rl_key, token_cost.total_cost_cents);
@@ -692,7 +692,7 @@ async fn handle_non_streaming(
         client_id,
         None,
         None,
-        true, // is_byok — RouteFuel is BYOK-only; every completed call was billed to a client key
+        true, // is_byok — RouterFuel is BYOK-only; every completed call was billed to a client key
     );
 
     // ========================================================================
@@ -714,7 +714,7 @@ async fn handle_non_streaming(
 // ============================================================================
 // SHADOW MODE
 //
-// A client sets `shadow_model` on a request; RouteFuel fires an identical
+// A client sets `shadow_model` on a request; RouterFuel fires an identical
 // request at that model *in addition to* the normally-routed one, purely
 // for comparison — the client only ever sees the primary response, and this
 // never blocks it or can make it fail. Useful for answering "would a
@@ -950,19 +950,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_thread_ids(true)
         .init();
 
-    info!("Starting RouteFuel v{} (BYOK-only — no gateway provider keys)", env!("CARGO_PKG_VERSION"));
+    info!("Starting RouterFuel v{} (BYOK-only — no gateway provider keys)", env!("CARGO_PKG_VERSION"));
 
     dotenv::dotenv().ok();
 
-    // NOTE: RouteFuel intentionally reads no OPENAI_API_KEY / ANTHROPIC_API_KEY
+    // NOTE: RouterFuel intentionally reads no OPENAI_API_KEY / ANTHROPIC_API_KEY
     // / etc. here. It never holds a provider key of its own — see
     // connectors.rs and the BYOK resolution logic in this file. The only
     // secrets it needs are its own database and its own client auth store.
     let database_url = std::env::var("DATABASE_URL")
         .expect("DATABASE_URL environment variable not set");
 
-    let routefuel_keys_raw = std::env::var("ROUTEFUEL_API_KEYS").unwrap_or_default();
-    let api_key_store = Arc::new(ApiKeyStore::from_env_string(&routefuel_keys_raw));
+    let routerfuel_keys_raw = std::env::var("ROUTERFUEL_API_KEYS").unwrap_or_default();
+    let api_key_store = Arc::new(ApiKeyStore::from_env_string(&routerfuel_keys_raw));
 
     info!("Configuration loaded from environment");
 
@@ -982,12 +982,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cost_tracker = Arc::new(CostTracker::new(pool.clone()));
     let rate_limiter = Arc::new(RateLimiter::new());
 
-    // Per-client rate-limit tiers — from ROUTEFUEL_CLIENT_TIERS and/or the
+    // Per-client rate-limit tiers — from ROUTERFUEL_CLIENT_TIERS and/or the
     // client_tiers table (migrations/003_client_tiers.sql already creates
     // it). Previously main.rs just hardcoded UserTier::Pro for everyone;
     // this is what actually makes per-client tiers real. See
     // src/client_registry.rs.
-    let client_tiers_raw = std::env::var("ROUTEFUEL_CLIENT_TIERS").unwrap_or_default();
+    let client_tiers_raw = std::env::var("ROUTERFUEL_CLIENT_TIERS").unwrap_or_default();
     client_registry::load_all_tiers(&pool, &rate_limiter, &client_tiers_raw, TierConfig::PRO).await;
 
     // Runaway-agent protection — see src/guardrails.rs. Both are cheap,
@@ -1131,14 +1131,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/audit/daily", get(audit_daily_handler))
         .with_state(state);
 
-    // Admin dashboard — see src/admin.rs. Guarded by ROUTEFUEL_ADMIN_KEY
+    // Admin dashboard — see src/admin.rs. Guarded by ROUTERFUEL_ADMIN_KEY
     // (X-Admin-Key header), a separate secret from per-client BYOK/auth
     // keys, since a client key must never be able to see other clients'
-    // spend. If ROUTEFUEL_ADMIN_KEY isn't set, admin_key_middleware refuses
+    // spend. If ROUTERFUEL_ADMIN_KEY isn't set, admin_key_middleware refuses
     // every request with 503 rather than silently leaving the dashboard open.
-    let admin_key = Arc::new(std::env::var("ROUTEFUEL_ADMIN_KEY").unwrap_or_default());
+    let admin_key = Arc::new(std::env::var("ROUTERFUEL_ADMIN_KEY").unwrap_or_default());
     if admin_key.is_empty() {
-        warn!("ROUTEFUEL_ADMIN_KEY is not set — the admin dashboard API is disabled until it is");
+        warn!("ROUTERFUEL_ADMIN_KEY is not set — the admin dashboard API is disabled until it is");
     } else {
         info!("Admin dashboard API enabled at /admin/* (X-Admin-Key required)");
     }

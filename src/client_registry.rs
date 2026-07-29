@@ -1,11 +1,11 @@
 // =============================================================================
-// src/client_registry.rs  — RouteFuel v0.7
+// src/client_registry.rs  — RouterFuel v0.7
 //
 // Per-client tier assignment — this is what closes the TODO left in
 // main.rs's rate-limit check ("wire this up to the client_tiers table for
 // per-client overrides"). Loaded at startup from either:
 //
-//   A) Environment variable ROUTEFUEL_CLIENT_TIERS (fast, no DB needed)
+//   A) Environment variable ROUTERFUEL_CLIENT_TIERS (fast, no DB needed)
 //      Format:  "raw_key_1:pro,raw_key_2:enterprise,raw_key_3:free"
 //      Keys are hashed to match ApiKeyStore's client_id convention.
 //
@@ -43,7 +43,7 @@ pub fn parse_tier(s: &str) -> TierConfig {
 // =============================================================================
 // Load from environment variable
 //
-// ROUTEFUEL_CLIENT_TIERS format:
+// ROUTERFUEL_CLIENT_TIERS format:
 //   "raw_key_1:pro,raw_key_2:enterprise,raw_key_3:free"
 //
 // Keys are stored as SHA-256 hashes in ApiKeyStore (see auth.rs) — here we
@@ -74,7 +74,7 @@ pub fn load_tiers_from_env(raw: &str, rate_limiter: &Arc<RateLimiter>) -> usize 
             }
             None => {
                 error!(
-                    "Bad ROUTEFUEL_CLIENT_TIERS entry '{}' — format: raw_key:tier",
+                    "Bad ROUTERFUEL_CLIENT_TIERS entry '{}' — format: raw_key:tier",
                     entry
                 );
             }
@@ -148,7 +148,7 @@ pub async fn load_all_tiers(
     if !env_tiers_raw.is_empty() {
         let n = load_tiers_from_env(env_tiers_raw, rate_limiter);
         total += n;
-        info!("Loaded {} client tiers from ROUTEFUEL_CLIENT_TIERS", n);
+        info!("Loaded {} client tiers from ROUTERFUEL_CLIENT_TIERS", n);
     }
 
     match load_tiers_from_db(pool, rate_limiter).await {
@@ -164,7 +164,7 @@ pub async fn load_all_tiers(
     if total == 0 {
         warn!(
             "No client tiers configured — every client will get the '{}' tier ({} req/s) \
-             until explicitly registered. Set ROUTEFUEL_CLIENT_TIERS or add rows to \
+             until explicitly registered. Set ROUTERFUEL_CLIENT_TIERS or add rows to \
              client_tiers.",
             default_tier.name, default_tier.capacity
         );

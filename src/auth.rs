@@ -1,15 +1,15 @@
 // =============================================================================
-// src/auth.rs — RouteFuel v0.4
+// src/auth.rs — RouterFuel v0.4
 //
 // How it works:
 //   1. Client sends:   X-API-Key: rf_live_abc123yoursecretkey
 //   2. Middleware SHA-256 hashes the raw key
 //   3. Compares hash against the in-memory store (no plaintext ever stored)
-//   4. If valid → injects X-Routefuel-Client-Id header for downstream handlers
+//   4. If valid → injects X-Routerfuel-Client-Id header for downstream handlers
 //   5. If invalid → returns 401 immediately, request never reaches the handler
 //   6. Also provides ClientProviderKeys extractor for BYOK provider headers
 //
-// Key store is loaded once at startup from the ROUTEFUEL_API_KEYS env var.
+// Key store is loaded once at startup from the ROUTERFUEL_API_KEYS env var.
 // Format:  sha256hex:ClientName,sha256hex:ClientName,...
 //
 // To generate a key hash on the command line:
@@ -45,7 +45,7 @@ pub struct ClientProviderKeys {
     pub zhipu: Option<String>,
     pub meta: Option<String>,
     /// OpenRouter acts as a universal fallback: if a client supplies only
-    /// this key, RouteFuel routes *any* model through OpenRouter instead of
+    /// this key, RouterFuel routes *any* model through OpenRouter instead of
     /// requiring a separate key per lab — see main.rs `resolve_byok_route`.
     pub openrouter: Option<String>,
 }
@@ -127,7 +127,7 @@ pub struct ApiKeyStore {
 }
 
 impl ApiKeyStore {
-    /// Parse the ROUTEFUEL_API_KEYS env var.
+    /// Parse the ROUTERFUEL_API_KEYS env var.
     /// Expected format:  "sha256hex:ClientA,sha256hex:ClientB"
     pub fn from_env_string(raw: &str) -> Self {
         let mut keys = HashMap::new();

@@ -58,7 +58,7 @@ Now:
 | OpenRouter (universal fallback) | `X-Openrouter-Api-Key` |
 
 `main.rs` no longer reads `OPENAI_API_KEY`/`ANTHROPIC_API_KEY`/etc. at all — the
-only secrets it needs now are `DATABASE_URL` and `ROUTEFUEL_API_KEYS` (your
+only secrets it needs now are `DATABASE_URL` and `routerfuel_API_KEYS` (your
 own client auth store).
 
 ## 3. OpenRouter integration

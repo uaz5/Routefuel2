@@ -52,23 +52,37 @@ impl CircuitBreaker {
 
     /// Check if a provider's circuit is open (not available)
     pub fn is_open(&self, provider: Provider) -> bool {
+    // Fast path under a read lock.
+    {
         let providers = self.providers.read();
         let state = providers.get(&provider).cloned().unwrap_or_default();
-
         match state.state {
-            CircuitState::Closed => false,
+            CircuitState::Closed => return false,
+            CircuitState::HalfOpen => return false,
             CircuitState::Open => {
-                if let Some(opened_at) = state.opened_at {
-                    if opened_at.elapsed() > RESET_TIMEOUT {
-                        // Timeout expired, try half-open
-                        return false;
-                    }
+                let expired = state
+                    .opened_at
+                    .map(|t| t.elapsed() > RESET_TIMEOUT)
+                    .unwrap_or(false);
+                if !expired {
+                    return true;
                 }
-                true
+                // else fall through to actually transition to HalfOpen below
             }
-            CircuitState::HalfOpen => false,
         }
     }
+
+    // Timeout expired — actually record the HalfOpen transition so
+    // state() reports it correctly and a failed trial can re-arm the
+    // breaker with a fresh timer.
+    let mut providers = self.providers.write();
+    let state = providers.entry(provider).or_default();
+    if state.state == CircuitState::Open {
+        state.state = CircuitState::HalfOpen;
+        info!(?provider, "Circuit breaker half-open — allowing trial request");
+    }
+    false
+}
 
     /// Record a successful request
     pub fn record_success(&self, provider: Provider) {
@@ -86,23 +100,27 @@ impl CircuitBreaker {
     }
 
     /// Record a failed request (5xx, timeout, etc.)
-    pub fn record_failure(&self, provider: Provider) {
-        let mut providers = self.providers.write();
-        let state = providers.entry(provider).or_default();
+   pub fn record_failure(&self, provider: Provider) {
+    let mut providers = self.providers.write();
+    let state = providers.entry(provider).or_default();
 
-        state.failures += 1;
-        state.last_failure_time = Some(Instant::now());
+    state.failures += 1;
+    state.last_failure_time = Some(Instant::now());
 
-        if state.failures >= FAILURE_THRESHOLD && state.state != CircuitState::Open {
-            state.state = CircuitState::Open;
-            state.opened_at = Some(Instant::now());
-            warn!(
-                ?provider,
-                failures = state.failures,
-                "Circuit breaker opened due to failures"
-            );
-        }
+    if state.state == CircuitState::HalfOpen {
+        state.state = CircuitState::Open;
+        state.opened_at = Some(Instant::now());
+        warn!(?provider, "Circuit breaker re-opened after failed half-open trial");
+    } else if state.failures >= FAILURE_THRESHOLD && state.state != CircuitState::Open {
+        state.state = CircuitState::Open;
+        state.opened_at = Some(Instant::now());
+        warn!(
+            ?provider,
+            failures = state.failures,
+            "Circuit breaker opened due to failures"
+        );
     }
+}
 
     /// Get current state of a provider
     pub fn state(&self, provider: Provider) -> CircuitState {

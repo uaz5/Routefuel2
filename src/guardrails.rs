@@ -1,8 +1,8 @@
 // =============================================================================
-// src/guardrails.rs — RouteFuel v0.7
+// src/guardrails.rs — RouterFuel v0.7
 //
 // Two independent safety nets against a runaway agent quietly racking up a
-// huge bill (the client's bill, since RouteFuel is BYOK-only — but a client
+// huge bill (the client's bill, since RouterFuel is BYOK-only — but a client
 // stuck in a loop is still a support fire, a trust problem, and exactly the
 // kind of thing a gateway should catch before the 500th identical call, not
 // after). Both checks run BEFORE any provider is called, so a blocked

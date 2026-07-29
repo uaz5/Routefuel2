@@ -1,5 +1,5 @@
 // =============================================================================
-// src/admin.rs  — RouteFuel v0.7 — dashboard backend
+// src/admin.rs  — RouterFuel v0.7 — dashboard backend
 //
 // Admin Dashboard API
 //

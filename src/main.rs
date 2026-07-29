@@ -187,18 +187,20 @@ fn resolve_byok_route(
     }
 
     if let Some(or_key) = keys.openrouter.as_deref() {
-        let model_id_to_send = if selected_provider == Provider::OpenRouter {
-            requested_model.to_string()
-        } else {
-            format!("{}/{}", selected_provider.openrouter_prefix(), requested_model)
-        };
-        return Ok(ByokRoute {
-            provider_to_call: Provider::OpenRouter,
-            model_id_to_send,
-            api_key: or_key.to_string(),
-            used_openrouter_fallback: true,
-        });
-    }
+    let prefix = selected_provider.openrouter_prefix();
+    let already_prefixed = requested_model.starts_with(&format!("{prefix}/"));
+    let model_id_to_send = if selected_provider == Provider::OpenRouter || already_prefixed {
+        requested_model.to_string()
+    } else {
+        format!("{prefix}/{requested_model}")
+    };
+    return Ok(ByokRoute {
+        provider_to_call: Provider::OpenRouter,
+        model_id_to_send,
+        api_key: or_key.to_string(),
+        used_openrouter_fallback: true,
+    });
+}
 
     Err(ApiError::BadRequest(format!(
         "No API key supplied for provider '{selected_provider}'. RouterFuel is fully bring-your-own-key: \

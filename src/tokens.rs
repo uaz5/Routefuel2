@@ -1,5 +1,5 @@
 // =============================================================================
-// src/tokens.rs  — RouteFuel v0.5
+// src/tokens.rs  — RouterFuel v0.5
 //
 // Precision token counting using OpenAI's tiktoken tokenizer (cl100k_base).
 // Used for:

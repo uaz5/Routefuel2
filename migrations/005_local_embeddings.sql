@@ -1,8 +1,8 @@
 -- =============================================================================
--- migrations/005_local_embeddings.sql  — RouteFuel v0.6
+-- migrations/005_local_embeddings.sql  — RouterFuel v0.6
 --
 -- Switches the semantic cache from OpenAI's paid text-embedding-3-small
--- (1536 dims, billed to RouteFuel's own key — a BYOK violation) to a local
+-- (1536 dims, billed to RouterFuel's own key — a BYOK violation) to a local
 -- ONNX sentence-embedding model (384 dims, e.g. all-MiniLM-L6-v2) run
 -- in-process by src/embedder.rs. Zero external cost, no network round trip.
 --

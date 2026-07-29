@@ -1,5 +1,5 @@
 -- =============================================================================
--- migrations/003_client_tiers.sql  — RouteFuel v0.5
+-- migrations/003_client_tiers.sql  — RouterFuel v0.5
 --
 -- Stores per-client rate limit tiers so they can be changed without redeploy.
 -- client_id = SHA-256 hex of the raw API key (same as auth store).

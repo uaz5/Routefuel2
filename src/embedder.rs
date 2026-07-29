@@ -1,5 +1,5 @@
 // =============================================================================
-// src/embedder.rs — RouteFuel v0.9 (fixed: Session::run needs &mut self)
+// src/embedder.rs — RouterFuel v0.9 (fixed: Session::run needs &mut self)
 // =============================================================================
 
 use anyhow::{anyhow, Context, Result};

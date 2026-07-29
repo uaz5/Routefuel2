@@ -1,5 +1,5 @@
 // ============================================================================
-// src/concurrency.rs — RouteFuel v0.8
+// src/concurrency.rs — RouterFuel v0.8
 //
 // Bounds how many provider calls can be in flight at once, across BOTH the
 // non-streaming path (main.rs's handle_non_streaming) and the streaming path
@@ -7,7 +7,7 @@
 // level rather than inside ConnectorManager, which the streaming path never
 // touches (it talks to providers directly for full control over SSE parsing).
 //
-// Without this, a traffic spike means RouteFuel opens as many simultaneous
+// Without this, a traffic spike means RouterFuel opens as many simultaneous
 // HTTP connections to providers as it has incoming requests — which is
 // exactly how you get rate-limited or IP-blocked by a provider during a
 // burst, on top of however many client keys are hammering it at once. A

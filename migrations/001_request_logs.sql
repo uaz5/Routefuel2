@@ -1,5 +1,5 @@
 -- =============================================================================
--- RouteFuel v0.4  —  Request logs audit table
+-- RouterFuel v0.4  —  Request logs audit table
 -- Run automatically by sqlx::migrate! on startup
 -- =============================================================================
 
@@ -49,7 +49,7 @@ CREATE INDEX IF NOT EXISTS idx_rl_date_provider
     ON request_logs (created_at, provider)
     WHERE status = 'success';
 
-COMMENT ON TABLE  request_logs                IS 'Immutable audit trail of every request routed through RouteFuel';
+COMMENT ON TABLE  request_logs                IS 'Immutable audit trail of every request routed through RouterFuel';
 COMMENT ON COLUMN request_logs.cost_cents     IS 'Actual cost in USD cents for this request';
 COMMENT ON COLUMN request_logs.cost_saved_cents IS 'Savings vs GPT-4o baseline in USD cents';
 COMMENT ON COLUMN request_logs.routing_decision_ms IS 'Time to select a model — should be <10ms';

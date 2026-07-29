@@ -1,12 +1,12 @@
 // =============================================================================
-// src/openrouter_catalog.rs — RouteFuel v0.7
+// src/openrouter_catalog.rs — RouterFuel v0.7
 //
 // GET https://openrouter.ai/api/v1/models is public — no API key required to
-// list it, only to actually call a model. RouteFuel fetches it once at
+// list it, only to actually call a model. RouterFuel fetches it once at
 // startup and merges every entry into the registry as a `Provider::OpenRouter`
 // model, so:
 //   - "100+ LLMs via OpenRouter" stays true automatically as OpenRouter adds
-//     models, instead of RouteFuel maintaining a second hardcoded list that
+//     models, instead of RouterFuel maintaining a second hardcoded list that
 //     goes stale the day after someone writes it.
 //   - A client who only has an OpenRouter key (very common — see main.rs's
 //     BYOK fallback logic) can route to anything OpenRouter carries, not
@@ -61,7 +61,7 @@ struct OpenRouterPricing {
     completion: Option<String>,
 }
 
-/// Fetch and translate the full public OpenRouter catalog into RouteFuel's
+/// Fetch and translate the full public OpenRouter catalog into RouterFuel's
 /// `ModelConfig` shape. Returns an error (never panics) on any network or
 /// parse failure — callers should treat that as non-fatal, since the
 /// curated registry in route_engine.rs works fine on its own.
@@ -81,7 +81,7 @@ pub async fn fetch_openrouter_catalog(client: &reqwest::Client) -> Result<Vec<Mo
 
     let models = parsed.data.into_iter().filter_map(to_model_config).collect::<Vec<_>>();
 
-    debug!(count = models.len(), "Translated OpenRouter catalog into RouteFuel ModelConfig entries");
+    debug!(count = models.len(), "Translated OpenRouter catalog into RouterFuel ModelConfig entries");
 
     Ok(models)
 }

@@ -1,5 +1,5 @@
 // =============================================================================
-// src/semantic_cache.rs  — RouteFuel v0.7 (fixed)
+// src/semantic_cache.rs  — RouterFuel v0.7 (fixed)
 //
 // Semantic Cache using pgvector + a local ONNX embedding model.
 //

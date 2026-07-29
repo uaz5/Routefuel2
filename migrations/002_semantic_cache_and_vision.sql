@@ -1,5 +1,5 @@
 -- =============================================================================
--- migrations/002_semantic_cache_and_vision.sql  — RouteFuel v0.5
+-- migrations/002_semantic_cache_and_vision.sql  — RouterFuel v0.5
 -- Adds:
 --   1. pgvector extension
 --   2. semantic_cache table with HNSW index (1536-dim for OpenAI text-embedding-3-small)

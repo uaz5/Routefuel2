@@ -382,6 +382,13 @@ impl TelemetryRecorder {
     }
 
     /// Export telemetry as CSV for analysis
+    fn csv_escape(field: &str) -> String {
+    if field.contains(',') || field.contains('"') || field.contains('\n') {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field.to_string()
+    }
+}
     pub async fn export_as_csv(&self, output_path: &str) -> TelemetryResult<()> {
         let buffer = self.buffer.read().await;
 
@@ -398,25 +405,25 @@ impl TelemetryRecorder {
         )?;
 
         // Write data rows
-        for record in buffer.iter() {
+        ffor record in buffer.iter() {
             writeln!(
                 file,
                 "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-                record.request_id,
+                csv_escape(&record.request_id),
                 record.timestamp,
-                record.chosen_model,
-                record.shadow_model.as_deref().unwrap_or(""),
+                csv_escape(&record.chosen_model),
+                csv_escape(record.shadow_model.as_deref().unwrap_or("")),
                 record.latency_ms,
                 record.chosen_cost,
                 record.baseline_cost,
                 record.cost_delta,
-                record.priority,
-                record.user_tier,
+                csv_escape(&record.priority),
+                csv_escape(&record.user_tier),
                 record.failover_triggered,
-                record.provider,
+                csv_escape(&record.provider),
                 record.success,
                 record.tokens_used,
-                record.client_id
+                csv_escape(&record.client_id)
             )?;
         }
 

@@ -233,8 +233,10 @@ pub async fn api_key_middleware(
                 "x-routerfuel-client-id",
                 client_name
                     .parse()
-                    .unwrap_or_else(|_| "unknown".parse().unwrap()),
-            );
+                    .unwrap_or_else(|_| {
+    warn!("client name '{}' contains invalid header characters, falling back to 'unknown'", client_name);
+    "unknown".parse().unwrap()
+}),
 
             next.run(request).await
         }

@@ -405,7 +405,7 @@ impl TelemetryRecorder {
         )?;
 
         // Write data rows
-        ffor record in buffer.iter() {
+        for record in buffer.iter() {
             writeln!(
                 file,
                 "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",

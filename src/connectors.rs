@@ -610,13 +610,22 @@ impl Connector for GeminiConnector {
                 }
             })?;
 
-        let status = http_resp.status().as_u16();
-        let text = http_resp.text().await?;
+       let status = http_resp.status().as_u16();
+        let text = http_resp.text().await.map_err(|e| {
+            if e.is_timeout() {
+                self.circuit_breaker.record_failure(Provider::Gemini);
+                ConnectorError::Timeout
+            } else {
+                ConnectorError::Http(e)
+            }
+        })?;
 
         match status {
             200..=299 => {
-                let gr: GeminiResp = serde_json::from_str(&text)?;
-
+                let gr: GeminiResp = serde_json::from_str(&text).map_err(|e| {
+                    self.circuit_breaker.record_failure(Provider::Gemini);
+                    ConnectorError::BadResponse(format!("Provider returned unexpected response format: {e}"))
+                })?;
                 let content = gr
                     .candidates
                     .first()

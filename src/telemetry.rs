@@ -405,25 +405,25 @@ impl TelemetryRecorder {
         )?;
 
         // Write data rows
-        for record in buffer.iter() {
+       for record in buffer.iter() {
             writeln!(
                 file,
                 "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-                csv_escape(&record.request_id),
+                Self::csv_escape(&record.request_id),
                 record.timestamp,
-                csv_escape(&record.chosen_model),
-                csv_escape(record.shadow_model.as_deref().unwrap_or("")),
+                Self::csv_escape(&record.chosen_model),
+                Self::csv_escape(record.shadow_model.as_deref().unwrap_or("")),
                 record.latency_ms,
                 record.chosen_cost,
                 record.baseline_cost,
                 record.cost_delta,
-                csv_escape(&record.priority),
-                csv_escape(&record.user_tier),
+                Self::csv_escape(&record.priority),
+                Self::csv_escape(&record.user_tier),
                 record.failover_triggered,
-                csv_escape(&record.provider),
+                Self::csv_escape(&record.provider),
                 record.success,
                 record.tokens_used,
-                csv_escape(&record.client_id)
+                Self::csv_escape(&record.client_id)
             )?;
         }
 

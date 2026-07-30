@@ -86,18 +86,23 @@ impl CircuitBreaker {
 
     /// Record a successful request
     pub fn record_success(&self, provider: Provider) {
-        let mut providers = self.providers.write();
-        let state = providers.entry(provider).or_default();
+    let mut providers = self.providers.write();
+    let state = providers.entry(provider).or_default();
 
-        state.failures = 0;
-        state.last_failure_time = None;
+    state.failures = 0;
+    state.last_failure_time = None;
 
-        if state.state == CircuitState::HalfOpen {
-            state.state = CircuitState::Closed;
-            state.opened_at = None;
+    if state.state != CircuitState::Closed {
+        let was_half_open = state.state == CircuitState::HalfOpen;
+        state.state = CircuitState::Closed;
+        state.opened_at = None;
+        if was_half_open {
             info!(?provider, "Circuit breaker closed after recovery");
+        } else {
+            info!(?provider, "Circuit breaker closed by success while open");
         }
     }
+}
 
     /// Record a failed request (5xx, timeout, etc.)
    pub fn record_failure(&self, provider: Provider) {

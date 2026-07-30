@@ -48,11 +48,11 @@ impl SemanticCache {
     pub fn disable(&mut self) { self.enabled = false; }
 
     #[instrument(skip(self, prompt))]
-    pub async fn lookup(&self, prompt: &str) -> Option<CacheHit> {
+   pub async fn lookup(&self, prompt: &str, model: &str) -> Option<CacheHit> {
         if !self.enabled { return None; }
 
         let start = Instant::now();
-        let hash = sha256_hex(prompt);
+        let hash = sha256_hex(&format!("{model}\u{0}{prompt}"));
 
         let exact: Option<(String, String)> = sqlx::query_as(
             "SELECT cached_response, model_used
@@ -96,41 +96,41 @@ impl SemanticCache {
 
         let vector = Vector::from(embedding_vec);
 
-        let row: Option<(String, String, f64)> = sqlx::query_as(
-            "SELECT cached_response, model_used,
-                    1 - (embedding <=> $1::vector) AS similarity
-             FROM semantic_cache
-             WHERE 1 - (embedding <=> $1::vector) >= $2
-             ORDER BY embedding <=> $1::vector
-             LIMIT 1",
+       let row: Option<(String, String, f64, String)> = sqlx::query_as(
+    "SELECT cached_response, model_used,
+            1 - (embedding <=> $1::vector) AS similarity,
+            prompt_hash
+     FROM semantic_cache
+     WHERE model_used = $3
+       AND 1 - (embedding <=> $1::vector) >= $2
+     ORDER BY embedding <=> $1::vector
+     LIMIT 1",
+)
+.bind(&vector)
+.bind(SIMILARITY_THRESHOLD)
+.bind(model)
+.fetch_optional(self.pool.as_ref())
+.await
+.ok()
+.flatten();
+
+if let Some((response, model, similarity, matched_hash)) = row {
+    debug!(similarity = similarity, latency_ms = start.elapsed().as_millis(), "Semantic cache hit");
+
+    let pool = Arc::clone(&self.pool);
+    tokio::spawn(async move {
+        let _ = sqlx::query(
+            "UPDATE semantic_cache
+             SET hit_count = hit_count + 1, last_hit_at = NOW()
+             WHERE prompt_hash = $1"
         )
-        .bind(&vector)
-        .bind(SIMILARITY_THRESHOLD)
-        .fetch_optional(self.pool.as_ref())
-        .await
-        .ok()
-        .flatten();
+        .bind(&matched_hash)
+        .execute(pool.as_ref())
+        .await;
+    });
 
-        if let Some((response, model, similarity)) = row {
-            debug!(similarity = similarity, latency_ms = start.elapsed().as_millis(), "Semantic cache hit");
-
-            let response_clone = response.clone();
-            let pool = Arc::clone(&self.pool);
-            tokio::spawn(async move {
-                let _ = sqlx::query(
-                    "UPDATE semantic_cache
-                     SET hit_count = hit_count + 1, last_hit_at = NOW()
-                     WHERE cached_response = $1
-                     LIMIT 1"
-                )
-                .bind(&response_clone)
-                .execute(pool.as_ref())
-                .await;
-            });
-
-            return Some(CacheHit { cached_response: response, model_used: model, similarity });
-        }
-
+    return Some(CacheHit { cached_response: response, model_used: model, similarity });
+}
         debug!(latency_ms = start.elapsed().as_millis(), "Cache miss");
         None
     }
@@ -142,7 +142,7 @@ impl SemanticCache {
         let pool = Arc::clone(&self.pool);
 
         tokio::spawn(async move {
-            let hash = sha256_hex(&prompt);
+            let hash = sha256_hex(&format!("{model_used}\u{0}{prompt}"));
 
             let embed_result = {
                 let prompt_clone = prompt.clone();

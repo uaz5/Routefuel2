@@ -867,7 +867,14 @@ async fn openai_compatible_call(
     })?;
 
     let status = http_resp.status().as_u16();
-    let text = http_resp.text().await?;
+    let text = http_resp.text().await.map_err(|e| {
+    if e.is_timeout() {
+        cb.record_failure(provider);
+        ConnectorError::Timeout
+    } else {
+        ConnectorError::Http(e)
+    }
+})?;
 
     match status {
         200..=299 => {

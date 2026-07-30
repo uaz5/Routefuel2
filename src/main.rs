@@ -434,7 +434,7 @@ async fn handle_non_streaming(
     // provider is called and nothing is billed to anyone on a cache hit)
     // ========================================================================
     if !prompt_text.is_empty() {
-        if let Some(hit) = state.semantic_cache.lookup(&prompt_text).await {
+       if let Some(hit) = state.semantic_cache.lookup(&prompt_text, &request.model).await {
             info!(
                 request_id = %request_id,
                 similarity = hit.similarity,

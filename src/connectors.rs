@@ -196,7 +196,7 @@ pub struct ConnectorResult {
 }
 
 #[async_trait]
-pub trait Connector: Send  Sync {
+pub trait Connector: Send + Sync {
     /// `client_api_key` is mandatory — RouterFuel holds no keys of its own.
     async fn complete(
         &self,
@@ -449,7 +449,7 @@ impl Connector for AnthropicConnector {
                     usage: Usage {
                         prompt_tokens: ar.usage.input_tokens,
                         completion_tokens: ar.usage.output_tokens,
-                        total_tokens: ar.usage.input_tokens  ar.usage.output_tokens,
+                        total_tokens: ar.usage.input_tokens + ar.usage.output_tokens,
                     },
                 };
 
@@ -660,7 +660,7 @@ impl Connector for GeminiConnector {
                     usage: Usage {
                         prompt_tokens,
                         completion_tokens,
-                        total_tokens: prompt_tokens  completion_tokens,
+                        total_tokens: prompt_tokens + completion_tokens,
                     },
                 };
 

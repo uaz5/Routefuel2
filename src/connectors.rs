@@ -897,7 +897,12 @@ async fn openai_compatible_call(
 
     match status {
         200..=299 => {
-            let resp: ChatCompletionResponse = serde_json::from_str(&text)?;
+            let resp: ChatCompletionResponse = serde_json::from_str(&text).map_err(|e| {
++                cb.record_failure(provider);
++                ConnectorError::BadResponse(format!(
++                    "Provider returned unexpected response format: {e}"
++                ))
++            })?;
             cb.record_success(provider);
             debug!(provider = %provider, latency_ms = start.elapsed().as_millis() as u64, "Provider call succeeded");
             Ok(ConnectorResult {

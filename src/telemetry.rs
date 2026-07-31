@@ -183,6 +183,9 @@ pub struct TelemetryRecorder {
 
     /// Enable telemetry recording
     enabled: bool,
+    /// Monotonic counter so two flushes landing in the same Unix second
++    /// still get distinct filenames, instead of silently sharing one file.
++    flush_counter: std::sync::atomic::AtomicU64,
 }
 
 impl TelemetryRecorder {
@@ -198,6 +201,7 @@ impl TelemetryRecorder {
             buffer: Arc::new(RwLock::new(Vec::with_capacity(max_buffer_size))),
             max_buffer_size,
             enabled: true,
+            flush_counter: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -245,8 +249,14 @@ impl TelemetryRecorder {
             .unwrap_or_default()
             .as_secs();
 
-        let filename = format!("{}/telemetry-{}.jsonl", self.output_dir, timestamp);
-
+         // Ordering::Relaxed is fine here — we only need each flush to get a
++        // distinct number, not any particular ordering relative to other
++        // memory operations.
++        let seq = self
++            .flush_counter
++            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++
++        let filename = format!("{}/telemetry-{}-{}.jsonl", self.output_dir, timestamp, seq);
         // Write to JSONL format (one JSON object per line)
         let file = OpenOptions::new()
             .create(true)

@@ -196,7 +196,7 @@ pub struct ConnectorResult {
 }
 
 #[async_trait]
-pub trait Connector: Send + Sync {
+pub trait Connector: Send  Sync {
     /// `client_api_key` is mandatory — RouterFuel holds no keys of its own.
     async fn complete(
         &self,
@@ -449,7 +449,7 @@ impl Connector for AnthropicConnector {
                     usage: Usage {
                         prompt_tokens: ar.usage.input_tokens,
                         completion_tokens: ar.usage.output_tokens,
-                        total_tokens: ar.usage.input_tokens + ar.usage.output_tokens,
+                        total_tokens: ar.usage.input_tokens  ar.usage.output_tokens,
                     },
                 };
 
@@ -660,7 +660,7 @@ impl Connector for GeminiConnector {
                     usage: Usage {
                         prompt_tokens,
                         completion_tokens,
-                        total_tokens: prompt_tokens + completion_tokens,
+                        total_tokens: prompt_tokens  completion_tokens,
                     },
                 };
 
@@ -795,7 +795,7 @@ impl ConnectorManager {
 
 fn build_client() -> reqwest::Client {
     reqwest::Client::builder()
-        // Connection pooling + keep-alive cuts TLS handshake latency on every
+        // Connection pooling  keep-alive cuts TLS handshake latency on every
         // repeat call to the same provider — meaningful at gateway volume.
         .pool_max_idle_per_host(64)
         .pool_idle_timeout(std::time::Duration::from_secs(90))
@@ -898,11 +898,11 @@ async fn openai_compatible_call(
     match status {
         200..=299 => {
             let resp: ChatCompletionResponse = serde_json::from_str(&text).map_err(|e| {
-+                cb.record_failure(provider);
-+                ConnectorError::BadResponse(format!(
-+                    "Provider returned unexpected response format: {e}"
-+                ))
-+            })?;
+                cb.record_failure(provider);
+                ConnectorError::BadResponse(format!(
+                    "Provider returned unexpected response format: {e}"
+                ))
+            })?;
             cb.record_success(provider);
             debug!(provider = %provider, latency_ms = start.elapsed().as_millis() as u64, "Provider call succeeded");
             Ok(ConnectorResult {

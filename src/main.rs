@@ -25,7 +25,7 @@ use axum::{
     extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     middleware,
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -42,7 +42,7 @@ use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::admin::AdminState;
-use crate::auth::{api_key_middleware, ApiKeyStore, ClientProviderKeys};
+use crate::auth::{api_key_middleware, cursor_bridge_middleware, ApiKeyStore, ClientProviderKeys};
 use crate::circuit_breaker::CircuitBreaker;
 use crate::concurrency::ConcurrencyLimiter;
 use crate::connectors::{
@@ -888,6 +888,9 @@ fn maybe_fire_shadow_request(
 // ============================================================================
 // HEALTH CHECK & AUDIT
 // ============================================================================
+async fn dashboard_handler() -> Html<&'static str> {
+    Html(include_str!("../static/dashboard.html"))
+}
 
 async fn health_handler() -> Json<serde_json::Value> {
     Json(json!({
@@ -1118,20 +1121,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         telemetry,
         concurrency_limiter,
     };
+    
 
+    
     let protected_routes = Router::new()
         .route("/v1/chat/completions", post(chat_completions_handler))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
             api_key_store,
             api_key_middleware,
-        ));
-
+        ))
+.layer(middleware::from_fn(cursor_bridge_middleware));
+    
     let public_routes = Router::new()
-        .route("/health", get(health_handler))
-        .route("/v1/models", get(models_handler))
-        .route("/audit/daily", get(audit_daily_handler))
-        .with_state(state);
+    .route("/health", get(health_handler))
+    .route("/v1/models", get(models_handler))
+    .route("/audit/daily", get(audit_daily_handler))
+    .route("/admin/dashboard", get(dashboard_handler)) 
+    .with_state(state);
 
     // Admin dashboard — see src/admin.rs. Guarded by ROUTERFUEL_ADMIN_KEY
     // (X-Admin-Key header), a separate secret from per-client BYOK/auth

@@ -126,7 +126,9 @@ Add a `shadow_model` field to compare a second model against the primary one, wi
 }
 ```
 
-The comparison (cost delta, latency delta, output length) lands in the `shadow_comparisons` table and is queryable via `GET /admin/shadow`. Requires `ENABLE_SHADOW_MODE=true` on the server.
+The comparison (cost delta, latency delta, output length) lands in the `shadow_comparisons` table and is queryable via `GET /admin/shadow`.
+
+**Shadow mode is ON by default.** Any client that sends `shadow_model` triggers a second, fully-billed call — there's no server-side opt-in required. This also means it's a second real charge to whatever BYOK key the client supplied for the shadow provider. Set `ENABLE_SHADOW_MODE=false` on the server if you don't want clients able to trigger this at all.
 
 ## 4. Other endpoints
 
@@ -135,11 +137,24 @@ The comparison (cost delta, latency delta, output length) lands in the `shadow_c
 | `/health` | GET | Liveness check, no auth |
 | `/v1/models` | GET | List every model in the registry, with pricing/context window/vision support |
 | `/v1/chat/completions` | POST | The main endpoint — see above |
-| `/audit/daily` | GET | Daily cost/savings report |
 
-### Admin dashboard
+`/audit/daily` moved under the admin section below — it now requires `X-Admin-Key`, same as every other cost/spend endpoint.
 
-These require `X-API-Key` set to your `ROUTERFUEL_ADMIN_KEY`:
+### Admin dashboard UI
+
+Instead of hitting the `/admin/*` endpoints directly, you can browse to:
+
+```
+http://localhost:3000/admin/dashboard
+```
+
+This serves a self-contained page (no build step, no separate deploy) that visualizes spend, cache hit rate, per-model and per-client cost, the request timeline, current rate-limit tiers, and shadow-mode comparisons — pulling live from the `/admin/*` endpoints below.
+
+Note that the **page itself loads for anyone** — `/admin/dashboard` is a public route. Only the data it fetches is protected: each `/admin/*` call still requires `X-Admin-Key`, so the page will load but its charts will fail to populate until you supply your admin key (however `dashboard.html` prompts for it — check the page itself for the exact flow).
+
+### Admin API endpoints
+
+These require `X-API-Key` set to your `ROUTERFUEL_ADMIN_KEY` — sent as the `X-Admin-Key` header:
 
 | Endpoint | Purpose |
 |---|---|
@@ -148,24 +163,54 @@ These require `X-API-Key` set to your `ROUTERFUEL_ADMIN_KEY`:
 | `/admin/models/expensive` | Top 5 most expensive models by spend |
 | `/admin/models/usage` | Usage breakdown by model |
 | `/admin/clients` | Spend broken down per client |
-| `/admin/timeline` | Day-by-day spend/request timeline |
+| `/admin/timeline` | Day-by-day spend/request timeline (last 24h, hourly) |
 | `/admin/rate-limits` | Current rate-limit tier per client |
 | `/admin/shadow` | Shadow-mode A/B comparison stats |
+| `/audit/daily` | Daily cost/savings report (takes a `date` query param, `YYYY-MM-DD`) |
 
-Most take `start` and `end` query params (`YYYY-MM-DD`):
+Most take **`from`** and **`to`** query params (`YYYY-MM-DD`) — note these are `from`/`to`, not `start`/`end`; unrecognized params are silently ignored and the query falls back to its default (last 30 days):
 
 ```bash
-curl "http://localhost:3000/admin/overview?start=2026-07-01&end=2026-07-27" \
-  -H "X-API-Key: your-admin-key"
+curl "http://localhost:3000/admin/overview?from=2026-07-01&to=2026-07-27" \
+  -H "X-Admin-Key: your-admin-key"
 ```
 
 ## 5. Rate limits
 
-Each client is assigned a tier — `free`, `pro`, or `enterprise` — via `ROUTERFUEL_CLIENT_TIERS` or the `client_tiers` Postgres table. A client with no explicit tier gets whatever the server's default is (falls back to `pro`). Exceeding your tier's requests-per-second returns `429`.
+Each client is assigned a tier — `free`, `pro`, or `enterprise` — via `ROUTERFUEL_CLIENT_TIERS` or the `client_tiers` Postgres table. Tiers are loaded once at server startup; a change to the DB table takes effect on the **next restart**, not live. A client with no explicit tier gets whatever the server's default is (falls back to `pro`). Exceeding your tier's requests-per-second returns `429`.
 
-## 6. Troubleshooting
+## 6. Cursor integration
+
+RouterFuel can sit behind Cursor's custom OpenAI-compatible model provider, so your editor's requests get routed through your own provider keys.
+
+1. In Cursor: **Settings → Models → OpenAI API → Override OpenAI Base URL**
+2. Set the base URL to your RouterFuel instance, e.g. `http://localhost:3000/v1`
+3. In the API key field, enter a **composite key** in this exact format:
+
+   ```
+   <routerfuel_api_key>:<provider>:<byok_provider_key>
+   ```
+
+   For example:
+
+   ```
+   rf_live_abc123:anthropic:sk-ant-yourkey
+   rf_live_abc123:openrouter:sk-or-yourkey   # universal fallback — works for any model
+   ```
+
+   Supported `<provider>` values: `openai`, `anthropic`, `deepseek`, `gemini`, `mistral`, `xai` (or `grok`), `qwen` (or `dashscope`), `moonshot` (or `kimi`), `zhipu` (or `glm`), `meta` (or `llama`), `openrouter`.
+
+4. Add your model of choice (e.g. `claude-sonnet-5`) to Cursor's model list
+
+**How this works under the hood:** Cursor only sends one opaque string as `Authorization: Bearer <token>` — it has no way to send RouterFuel's native `X-API-Key` + `X-<Provider>-Api-Key` header pair separately. A bridge middleware splits your composite token (on the first two colons only, so a colon inside the provider key itself is preserved) into those two headers before the request reaches auth. If you already send `X-API-Key` directly, this bridge is skipped entirely — it only activates when that header is absent.
+
+If the token doesn't match the `key:provider:key` shape, or the provider name isn't recognized, you'll get a `401` explaining exactly what was wrong.
+
+## 7. Troubleshooting
 
 - **`401 Unauthorized`** — check your `X-API-Key` header is set and matches a hash in `ROUTERFUEL_API_KEYS`
+- **`401` on a Cursor request** — check your composite key matches `<routerfuel_api_key>:<provider>:<byok_provider_key>` exactly, and that `<provider>` is one of the supported names above
 - **`429 Too Many Requests`** — you've hit your tier's rate limit; wait or ask for a tier upgrade
 - **`400` on an image request** — the model you pinned doesn't support vision; use `"model": "auto"` or check `/v1/models`
+- **Admin dashboard page loads but shows no data** — the page itself is public; make sure you've supplied your `ROUTERFUEL_ADMIN_KEY` where the dashboard asks for it
 - **Slow first request** — the local embedding model and OpenRouter catalog fetch happen at startup, not per-request, so this shouldn't recur

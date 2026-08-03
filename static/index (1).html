@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RouterFuel — Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<style>
+  :root{
+    --bg:#0b0e14;
+    --surface:#11151d;
+    --surface-2:#161c26;
+    --border:#232b38;
+    --text:#e8ecf1;
+    --text-dim:#8a94a6;
+    --text-faint:#565f70;
+    --signal:#5eead4;
+    --signal-dim:#2a4a48;
+    --amber:#f5a623;
+    --amber-dim:#4a3a1a;
+    --green:#34d399;
+    --red:#f87171;
+    --radius:10px;
+    --mono:'IBM Plex Mono', ui-monospace, monospace;
+    --sans:'Inter', -apple-system, sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:
+      radial-gradient(1200px 600px at 15% -10%, rgba(94,234,212,0.06), transparent),
+      var(--bg);
+    color:var(--text);
+    font-family:var(--sans);
+    min-height:100vh;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{background:var(--signal-dim);color:var(--text);}
+
+  /* ---------- top bar ---------- */
+  .topbar{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:16px 28px;border-bottom:1px solid var(--border);
+    position:sticky;top:0;background:rgba(11,14,20,0.85);backdrop-filter:blur(10px);z-index:20;
+  }
+  .brand{display:flex;align-items:center;gap:10px;}
+  .brand-mark{
+    width:26px;height:26px;border-radius:6px;
+    background:linear-gradient(135deg, var(--signal), #2b8a80);
+    display:flex;align-items:center;justify-content:center;
+    font-family:var(--mono);font-weight:700;color:#0b0e14;font-size:13px;
+  }
+  .brand-name{font-family:var(--mono);font-weight:600;letter-spacing:0.3px;font-size:15px;}
+  .brand-name span{color:var(--text-dim);font-weight:400;}
+  .conn{display:flex;align-items:center;gap:18px;}
+  .conn-fields{display:flex;gap:8px;align-items:center;}
+  .conn input{
+    background:var(--surface-2);border:1px solid var(--border);color:var(--text);
+    font-family:var(--mono);font-size:12px;padding:7px 10px;border-radius:7px;outline:none;width:190px;
+  }
+  .conn input:focus{border-color:var(--signal);}
+  .conn button{
+    background:var(--signal);color:#08211e;border:none;font-family:var(--sans);font-weight:600;
+    font-size:12.5px;padding:8px 14px;border-radius:7px;cursor:pointer;transition:opacity .15s;
+  }
+  .conn button:hover{opacity:0.85;}
+  .status-dot{width:7px;height:7px;border-radius:50%;background:var(--text-faint);flex-shrink:0;}
+  .status-dot.on{background:var(--green);box-shadow:0 0 8px rgba(52,211,153,0.7);}
+  .status-dot.off{background:var(--red);}
+  .status-label{font-family:var(--mono);font-size:11px;color:var(--text-dim);}
+
+  /* ---------- layout ---------- */
+  .wrap{max-width:1320px;margin:0 auto;padding:28px;}
+  .hint{
+    font-family:var(--mono);font-size:12.5px;color:var(--text-dim);
+    background:var(--surface);border:1px dashed var(--border);border-radius:var(--radius);
+    padding:14px 16px;margin-bottom:22px;line-height:1.6;
+  }
+  .hint code{color:var(--signal);background:none;}
+
+  .range-row{display:flex;align-items:center;gap:10px;margin-bottom:18px;}
+  .range-row label{font-family:var(--mono);font-size:11px;color:var(--text-faint);text-transform:uppercase;letter-spacing:0.06em;}
+  .range-row input[type=date]{
+    background:var(--surface-2);border:1px solid var(--border);color:var(--text);
+    font-family:var(--mono);font-size:12px;padding:6px 9px;border-radius:6px;outline:none;color-scheme:dark;
+  }
+  .range-row button{
+    background:var(--surface-2);border:1px solid var(--border);color:var(--text);
+    font-family:var(--sans);font-size:12px;font-weight:600;padding:7px 12px;border-radius:6px;cursor:pointer;
+  }
+  .range-row button:hover{border-color:var(--signal);color:var(--signal);}
+
+  /* ---------- KPI + gauge row ---------- */
+  .kpi-grid{
+    display:grid;grid-template-columns: 260px repeat(4, 1fr);gap:14px;margin-bottom:22px;
+  }
+  .card{
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+    padding:16px 18px;
+  }
+  .kpi-label{font-family:var(--mono);font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px;}
+  .kpi-value{font-family:var(--mono);font-size:26px;font-weight:600;line-height:1;}
+  .kpi-sub{font-size:11.5px;color:var(--text-dim);margin-top:6px;}
+  .kpi-value.green{color:var(--green);}
+  .kpi-value.red{color:var(--red);}
+  .kpi-value.signal{color:var(--signal);}
+
+  /* gauge */
+  .gauge-card{display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;}
+  .gauge-card .kpi-label{align-self:flex-start;}
+  .gauge-svg{width:210px;height:120px;margin-top:2px;}
+  .gauge-readout{margin-top:-46px;text-align:center;}
+  .gauge-readout .num{font-family:var(--mono);font-size:30px;font-weight:700;color:var(--amber);}
+  .gauge-readout .lbl{font-family:var(--mono);font-size:10px;color:var(--text-faint);letter-spacing:0.06em;text-transform:uppercase;margin-top:2px;}
+
+  /* ---------- timeline ---------- */
+  .panel{
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+    padding:18px 20px;margin-bottom:20px;
+  }
+  .panel-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
+  .panel-title{font-family:var(--mono);font-size:13px;font-weight:600;letter-spacing:0.02em;}
+  .panel-title .dim{color:var(--text-faint);font-weight:400;}
+  .chart-wrap{height:220px;}
+
+  /* ---------- tabs ---------- */
+  .tabs{display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid var(--border);}
+  .tab{
+    font-family:var(--mono);font-size:12.5px;color:var(--text-dim);padding:10px 16px;cursor:pointer;
+    border-bottom:2px solid transparent;user-select:none;
+  }
+  .tab.active{color:var(--signal);border-bottom-color:var(--signal);}
+  .tab:hover:not(.active){color:var(--text);}
+  .tabpage{display:none;}
+  .tabpage.active{display:block;}
+
+  /* ---------- tables ---------- */
+  table{width:100%;border-collapse:collapse;font-size:12.5px;}
+  thead th{
+    text-align:left;font-family:var(--mono);font-size:10.5px;color:var(--text-faint);
+    text-transform:uppercase;letter-spacing:0.06em;padding:8px 10px;border-bottom:1px solid var(--border);
+    font-weight:500;
+  }
+  tbody td{padding:9px 10px;border-bottom:1px solid var(--border);font-family:var(--mono);color:var(--text);}
+  tbody tr:hover{background:var(--surface-2);}
+  tbody tr:last-child td{border-bottom:none;}
+  .num-cell{text-align:right;}
+  .prov-tag{
+    display:inline-block;font-family:var(--sans);font-size:10.5px;font-weight:600;
+    padding:2px 7px;border-radius:5px;background:var(--surface-2);color:var(--text-dim);
+    border:1px solid var(--border);
+  }
+  .bar-cell{display:flex;align-items:center;gap:8px;}
+  .bar-track{flex:1;height:5px;background:var(--surface-2);border-radius:3px;overflow:hidden;min-width:60px;}
+  .bar-fill{height:100%;background:var(--signal);border-radius:3px;}
+  .empty-row td{text-align:center;color:var(--text-faint);padding:24px;font-family:var(--sans);}
+  .delta-pos{color:var(--red);}
+  .delta-neg{color:var(--green);}
+
+  .footer-note{
+    font-family:var(--mono);font-size:11px;color:var(--text-faint);text-align:center;padding:26px 0 10px;
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand">
+    <div class="brand-mark">RF</div>
+    <div class="brand-name">ROUTERFUEL <span>/ admin</span></div>
+  </div>
+  <div class="conn">
+    <div class="conn-fields">
+      <input id="baseUrl" placeholder="Base URL (e.g. https://api.routerfuel.com)" />
+      <input id="adminKey" type="password" placeholder="X-Admin-Key" />
+      <button id="connectBtn">Connect</button>
+    </div>
+    <div style="display:flex;align-items:center;gap:7px;">
+      <div class="status-dot" id="statusDot"></div>
+      <div class="status-label" id="statusLabel">disconnected</div>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <div class="hint">
+    Enter your gateway's base URL and admin key (<code>ROUTERFUEL_ADMIN_KEY</code>) above, then Connect.
+    Nothing is sent anywhere except your own RouterFuel instance — the key is kept in this browser only.
+  </div>
+
+  <div class="range-row">
+    <label>Range</label>
+    <input type="date" id="fromDate" />
+    <span style="color:var(--text-faint);font-family:var(--mono);font-size:12px;">to</span>
+    <input type="date" id="toDate" />
+    <button id="applyRange">Apply</button>
+    <button id="last7">7d</button>
+    <button id="last30">30d</button>
+  </div>
+
+  <div class="kpi-grid">
+    <div class="card gauge-card">
+      <div class="kpi-label">Fuel saved vs. flagship baseline</div>
+      <svg class="gauge-svg" viewBox="0 0 210 120">
+        <path d="M 15 110 A 90 90 0 0 1 195 110" fill="none" stroke="#1b2230" stroke-width="14" stroke-linecap="round"/>
+        <path id="gaugeArc" d="M 15 110 A 90 90 0 0 1 195 110" fill="none" stroke="var(--amber)" stroke-width="14" stroke-linecap="round" stroke-dasharray="0 283" />
+      </svg>
+      <div class="gauge-readout">
+        <div class="num" id="gaugePct">—</div>
+        <div class="lbl">savings rate</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="kpi-label">Total requests</div>
+      <div class="kpi-value" id="kpiRequests">—</div>
+      <div class="kpi-sub" id="kpiRequestsSub">&nbsp;</div>
+    </div>
+    <div class="card">
+      <div class="kpi-label">Spend / Saved (USD)</div>
+      <div class="kpi-value signal" id="kpiSpend">—</div>
+      <div class="kpi-sub" id="kpiSaved">&nbsp;</div>
+    </div>
+    <div class="card">
+      <div class="kpi-label">Cache hit rate</div>
+      <div class="kpi-value green" id="kpiCache">—</div>
+      <div class="kpi-sub" id="kpiCacheSub">&nbsp;</div>
+    </div>
+    <div class="card">
+      <div class="kpi-label">Avg latency / routing</div>
+      <div class="kpi-value" id="kpiLatency">—</div>
+      <div class="kpi-sub" id="kpiRouting">&nbsp;</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <div class="panel-title">Request timeline <span class="dim">— last 24h, hourly</span></div>
+    </div>
+    <div class="chart-wrap"><canvas id="timelineChart"></canvas></div>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="usage">Model usage</div>
+    <div class="tab" data-tab="expensive">Top spend</div>
+    <div class="tab" data-tab="clients">Clients</div>
+    <div class="tab" data-tab="cache">Cache</div>
+    <div class="tab" data-tab="ratelimits">Rate limits</div>
+    <div class="tab" data-tab="shadow">Shadow mode</div>
+  </div>
+
+  <div class="tabpage active" id="page-usage">
+    <div class="panel" style="margin-bottom:0;">
+      <table>
+        <thead><tr><th>#</th><th>Model</th><th>Provider</th><th class="num-cell">Requests</th><th class="num-cell">Spend</th><th class="num-cell">Avg cost</th><th class="num-cell">Tokens in/out</th></tr></thead>
+        <tbody id="tblUsage"><tr class="empty-row"><td colspan="7">Connect to load data</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="tabpage" id="page-expensive">
+    <div class="panel" style="margin-bottom:0;">
+      <table>
+        <thead><tr><th>#</th><th>Model</th><th>Provider</th><th class="num-cell">Requests</th><th class="num-cell">Total spend</th><th>Share</th></tr></thead>
+        <tbody id="tblExpensive"><tr class="empty-row"><td colspan="6">Connect to load data</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="tabpage" id="page-clients">
+    <div class="panel" style="margin-bottom:0;">
+      <table>
+        <thead><tr><th>Client</th><th class="num-cell">Requests</th><th class="num-cell">Spend</th><th class="num-cell">Saved</th><th class="num-cell">Avg latency</th></tr></thead>
+        <tbody id="tblClients"><tr class="empty-row"><td colspan="5">Connect to load data</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="tabpage" id="page-cache">
+    <div class="kpi-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:14px;">
+      <div class="card"><div class="kpi-label">Cache entries</div><div class="kpi-value" id="cacheEntries">—</div></div>
+      <div class="card"><div class="kpi-label">Total hits</div><div class="kpi-value signal" id="cacheHits">—</div></div>
+      <div class="card"><div class="kpi-label">Estimated saved</div><div class="kpi-value green" id="cacheSaved">—</div></div>
+    </div>
+    <div class="panel" style="margin-bottom:0;">
+      <div class="panel-title" style="margin-bottom:12px;">Top cached prompts</div>
+      <table>
+        <thead><tr><th>Prompt preview</th><th>Model</th><th class="num-cell">Hits</th></tr></thead>
+        <tbody id="tblCache"><tr class="empty-row"><td colspan="3">Connect to load data</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="tabpage" id="page-ratelimits">
+    <div class="panel" style="margin-bottom:0;">
+      <table>
+        <thead><tr><th>Client</th><th>Tier</th><th class="num-cell">Capacity (rps)</th></tr></thead>
+        <tbody id="tblRateLimits"><tr class="empty-row"><td colspan="3">Connect to load data</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="tabpage" id="page-shadow">
+    <div class="panel" style="margin-bottom:0;">
+      <table>
+        <thead><tr><th>Primary → Shadow</th><th class="num-cell">Comparisons</th><th class="num-cell">Avg cost Δ</th><th class="num-cell">Avg latency Δ</th><th class="num-cell">Error rate</th></tr></thead>
+        <tbody id="tblShadow"><tr class="empty-row"><td colspan="5">Connect to load data</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="footer-note">RouterFuel Admin · reads only, no writes performed by this page</div>
+</div>
+
+<script>
+let BASE = '';
+let KEY = '';
+let timelineChart = null;
+
+const $ = (id) => document.getElementById(id);
+const fmtUsd = (n) => '$' + (Number(n) || 0).toFixed(2);
+const fmtInt = (n) => (Number(n) || 0).toLocaleString();
+const fmtMs = (n) => Math.round(Number(n) || 0) + 'ms';
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function setStatus(ok, label){
+  $('statusDot').className = 'status-dot ' + (ok ? 'on' : 'off');
+  $('statusLabel').textContent = label;
+}
+
+async function api(path, params){
+  const url = new URL(BASE.replace(/\/$/, '') + path);
+  if (params) Object.entries(params).forEach(([k,v]) => v != null && url.searchParams.set(k, v));
+  const res = await fetch(url.toString(), { headers: { 'X-Admin-Key': KEY } });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`${path} → ${res.status} ${body}`);
+  }
+  return res.json();
+}
+
+function defaultRange(){
+  const to = new Date();
+  const from = new Date(); from.setDate(from.getDate() - 30);
+  $('fromDate').value = from.toISOString().slice(0,10);
+  $('toDate').value = to.toISOString().slice(0,10);
+}
+defaultRange();
+
+$('last7').addEventListener('click', () => {
+  const to = new Date(); const from = new Date(); from.setDate(from.getDate() - 7);
+  $('fromDate').value = from.toISOString().slice(0,10);
+  $('toDate').value = to.toISOString().slice(0,10);
+  loadAll();
+});
+$('last30').addEventListener('click', () => { defaultRange(); loadAll(); });
+$('applyRange').addEventListener('click', loadAll);
+
+$('connectBtn').addEventListener('click', () => {
+  BASE = $('baseUrl').value.trim();
+  KEY = $('adminKey').value.trim();
+  if (!BASE || !KEY) { setStatus(false, 'missing base url / key'); return; }
+  localStorage.setItem('rf_admin_base', BASE);
+  localStorage.setItem('rf_admin_key', KEY);
+  loadAll();
+});
+
+// restore saved connection
+const savedBase = localStorage.getItem('rf_admin_base');
+const savedKey = localStorage.getItem('rf_admin_key');
+if (savedBase) $('baseUrl').value = savedBase;
+if (savedKey) $('adminKey').value = savedKey;
+
+// tabs
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tabpage').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    $('page-' + tab.dataset.tab).classList.add('active');
+  });
+});
+
+function setGauge(pct){
+  const clamped = Math.max(0, Math.min(100, pct));
+  const totalLen = 283; // approx arc length for r=90 half-circle
+  const dash = (clamped/100) * totalLen;
+  $('gaugeArc').setAttribute('stroke-dasharray', `${dash} ${totalLen}`);
+  $('gaugePct').textContent = clamped.toFixed(1) + '%';
+}
+
+async function loadOverview(){
+  const from = $('fromDate').value, to = $('toDate').value;
+  const d = await api('/admin/overview', { from, to });
+  $('kpiRequests').textContent = fmtInt(d.total_requests);
+  $('kpiRequestsSub').textContent = `${fmtInt(d.successful_requests)} ok · ${fmtInt(d.failed_requests)} failed`;
+  $('kpiSpend').textContent = fmtUsd(d.total_spend_usd);
+  $('kpiSaved').textContent = `${fmtUsd(d.total_saved_usd)} saved · ${fmtInt(d.byok_requests)} BYOK`;
+  $('kpiCache').textContent = d.cache_hit_rate_pct.toFixed(1) + '%';
+  $('kpiCacheSub').textContent = `${fmtInt(d.cache_hits)} hits`;
+  $('kpiLatency').textContent = fmtMs(d.avg_latency_ms);
+  $('kpiRouting').textContent = `routing ${d.avg_routing_ms.toFixed(1)}ms`;
+  setGauge(d.total_saved_pct);
+}
+
+async function loadTimeline(){
+  const rows = await api('/admin/timeline');
+  const labels = rows.map(r => r.hour.slice(5,16).replace(' ', ' '));
+  const spend = rows.map(r => r.spend_usd);
+  const saved = rows.map(r => r.saved_usd);
+  const requests = rows.map(r => r.request_count);
+
+  if (timelineChart) timelineChart.destroy();
+  const ctx = $('timelineChart').getContext('2d');
+  timelineChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Spend (USD)', data: spend, borderColor: '#f5a623', backgroundColor: 'rgba(245,166,35,0.08)', fill: true, tension: 0.3, yAxisID: 'y', pointRadius: 0, borderWidth: 2 },
+        { label: 'Saved (USD)', data: saved, borderColor: '#34d399', backgroundColor: 'rgba(52,211,153,0.06)', fill: true, tension: 0.3, yAxisID: 'y', pointRadius: 0, borderWidth: 2 },
+        { label: 'Requests', data: requests, borderColor: '#5eead4', backgroundColor: 'transparent', tension: 0.3, yAxisID: 'y1', pointRadius: 0, borderWidth: 1.5, borderDash: [3,3] },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#8a94a6', font: { family: 'IBM Plex Mono', size: 11 }, boxWidth: 10 } },
+      },
+      scales: {
+        x: { ticks: { color: '#565f70', font: { family: 'IBM Plex Mono', size: 9 }, maxTicksLimit: 8 }, grid: { color: '#1b2230' } },
+        y: { position: 'left', ticks: { color: '#565f70', font: { family: 'IBM Plex Mono', size: 10 } }, grid: { color: '#1b2230' } },
+        y1: { position: 'right', ticks: { color: '#565f70', font: { family: 'IBM Plex Mono', size: 10 } }, grid: { drawOnChartArea: false } },
+      }
+    }
+  });
+}
+
+async function loadUsage(){
+  const from = $('fromDate').value, to = $('toDate').value;
+  const rows = await api('/admin/models/usage', { from, to });
+  $('tblUsage').innerHTML = rows.length ? rows.map(r => `
+    <tr>
+      <td>${r.rank}</td>
+      <td>${esc(r.model_name)}</td>
+      <td><span class="prov-tag">${esc(r.provider)}</span></td>
+      <td class="num-cell">${fmtInt(r.total_requests)}</td>
+      <td class="num-cell">${fmtUsd(r.total_spend_usd)}</td>
+      <td class="num-cell">${fmtUsd(r.avg_cost_usd)}</td>
+      <td class="num-cell">${fmtInt(r.total_tokens_in)} / ${fmtInt(r.total_tokens_out)}</td>
+    </tr>`).join('') : `<tr class="empty-row"><td colspan="7">No requests in range</td></tr>`;
+}
+
+async function loadExpensive(){
+  const from = $('fromDate').value, to = $('toDate').value;
+  const rows = await api('/admin/models/expensive', { from, to });
+  const max = Math.max(1, ...rows.map(r => r.total_spend_usd));
+  $('tblExpensive').innerHTML = rows.length ? rows.map(r => `
+    <tr>
+      <td>${r.rank}</td>
+      <td>${esc(r.model_name)}</td>
+      <td><span class="prov-tag">${esc(r.provider)}</span></td>
+      <td class="num-cell">${fmtInt(r.total_requests)}</td>
+      <td class="num-cell">${fmtUsd(r.total_spend_usd)}</td>
+      <td><div class="bar-cell"><div class="bar-track"><div class="bar-fill" style="width:${(r.total_spend_usd/max*100).toFixed(0)}%"></div></div></div></td>
+    </tr>`).join('') : `<tr class="empty-row"><td colspan="6">No requests in range</td></tr>`;
+}
+
+async function loadClients(){
+  const from = $('fromDate').value, to = $('toDate').value;
+  const rows = await api('/admin/clients', { from, to });
+  $('tblClients').innerHTML = rows.length ? rows.map(r => `
+    <tr>
+      <td>${esc(r.client_id)}</td>
+      <td class="num-cell">${fmtInt(r.total_requests)}</td>
+      <td class="num-cell">${fmtUsd(r.total_spend_usd)}</td>
+      <td class="num-cell">${fmtUsd(r.total_saved_usd)}</td>
+      <td class="num-cell">${fmtMs(r.avg_latency_ms)}</td>
+    </tr>`).join('') : `<tr class="empty-row"><td colspan="5">No requests in range</td></tr>`;
+}
+
+async function loadCache(){
+  const d = await api('/admin/cache');
+  $('cacheEntries').textContent = fmtInt(d.total_entries);
+  $('cacheHits').textContent = fmtInt(d.total_hits);
+  $('cacheSaved').textContent = fmtUsd(d.estimated_saved_usd);
+  $('tblCache').innerHTML = d.top_cached.length ? d.top_cached.map(r => `
+    <tr>
+      <td>${esc(r.prompt_preview)}</td>
+      <td>${esc(r.model_used)}</td>
+      <td class="num-cell">${fmtInt(r.hit_count)}</td>
+    </tr>`).join('') : `<tr class="empty-row"><td colspan="3">No cached prompts yet</td></tr>`;
+}
+
+async function loadRateLimits(){
+  const rows = await api('/admin/rate-limits');
+  $('tblRateLimits').innerHTML = rows.length ? rows.map(r => `
+    <tr>
+      <td>${esc(r.client_id)}</td>
+      <td><span class="prov-tag">${esc(r.tier)}</span></td>
+      <td class="num-cell">${fmtInt(r.capacity_rps)}</td>
+    </tr>`).join('') : `<tr class="empty-row"><td colspan="3">No registered clients seen yet</td></tr>`;
+}
+
+async function loadShadow(){
+  const from = $('fromDate').value, to = $('toDate').value;
+  const rows = await api('/admin/shadow', { from, to });
+  $('tblShadow').innerHTML = rows.length ? rows.map(r => {
+    const deltaClass = r.avg_cost_delta_usd > 0 ? 'delta-pos' : 'delta-neg';
+    return `
+    <tr>
+      <td>${esc(r.primary_model)} → ${esc(r.shadow_model)}</td>
+      <td class="num-cell">${fmtInt(r.comparisons)}</td>
+      <td class="num-cell ${deltaClass}">${r.avg_cost_delta_usd >= 0 ? '+' : ''}${fmtUsd(r.avg_cost_delta_usd)}</td>
+      <td class="num-cell">${r.avg_latency_delta_ms >= 0 ? '+' : ''}${Math.round(r.avg_latency_delta_ms)}ms</td>
+      <td class="num-cell">${r.shadow_error_rate_pct.toFixed(1)}%</td>
+    </tr>`; }).join('') : `<tr class="empty-row"><td colspan="5">No shadow-mode comparisons in range</td></tr>`;
+}
+
+async function loadAll(){
+  if (!BASE || !KEY) return;
+  try {
+    await Promise.all([
+      loadOverview(), loadTimeline(), loadUsage(), loadExpensive(),
+      loadClients(), loadCache(), loadRateLimits(), loadShadow()
+    ]);
+    setStatus(true, BASE.replace(/^https?:\/\//, ''));
+  } catch (e) {
+    console.error(e);
+    setStatus(false, 'error: ' + e.message.slice(0, 60));
+  }
+}
+
+if (savedBase && savedKey) {
+  BASE = savedBase; KEY = savedKey;
+  loadAll();
+}
+</script>
+</body>
+</html>

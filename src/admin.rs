@@ -11,10 +11,23 @@
 //   GET /admin/clients           — per-client spend breakdown
 //   GET /admin/timeline          — hourly request/cost timeline (last 24h)
 //   GET /admin/rate-limits       — every registered client's tier + capacity
+//   GET /admin/shadow            — shadow-mode A/B comparison stats
+//   GET /audit/daily             — daily cost/savings report (moved here —
+//                                  see note below)
 //
 // This file previously documented "all require X-API-Key with admin scope"
 // but never actually implemented that check — every query below was wide
 // open to anyone who found the route. `admin_key_middleware` closes that.
+//
+// FIX (this revision): `/audit/daily` used to live in main.rs's
+// `public_routes`, next to `/health` and `/v1/models`, with NO auth at all —
+// even though `get_daily_report` returns the same class of aggregate
+// spend/token data as `/admin/overview`, which has always required
+// X-Admin-Key. That was a real gap, not a docs mismatch: anyone who found
+// the route could pull cross-client spend data with zero credentials.
+// Moved here so it's covered by the same admin_key_middleware as everything
+// else in this file. `AdminState` now also carries `cost_tracker` so this
+// handler has what it needs.
 //
 // Column note: earlier revisions of this file queried `model_api_id`, but
 // migrations/001_request_logs.sql declares the column `model_name` (that's
@@ -31,8 +44,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPool;
 use sqlx::Row;
 use std::sync::Arc;
-use tracing::{instrument, warn};
+use tracing::{error, instrument, warn};
  
+use crate::cost_tracker::CostTracker;
 use crate::rate_limiter::RateLimiter;
  
 // =============================================================================
@@ -43,6 +57,10 @@ use crate::rate_limiter::RateLimiter;
 pub struct AdminState {
     pub pool: Arc<PgPool>,
     pub rate_limiter: Arc<RateLimiter>,
+    /// Added so `/audit/daily` can be served from here — see the FIX note
+    /// at the top of this file for why it moved out of main.rs's public
+    /// routes.
+    pub cost_tracker: Arc<CostTracker>,
 }
  
 // =============================================================================
@@ -554,7 +572,7 @@ pub async fn timeline_handler(State(state): State<AdminState>) -> impl IntoRespo
 }
  
 // =============================================================================
-// GET /admin/rate-limits  — new: every registered client's tier + capacity.
+// GET /admin/rate-limits  — every registered client's tier + capacity.
 // Doesn't exist without a DB query in the original file — the rate limiter
 // registry (rate_limiter.rs) only lived in memory with no way to inspect it
 // from outside the process. Since it's in-memory, this only lists clients
@@ -640,6 +658,42 @@ pub async fn shadow_stats_handler(
                 })
                 .collect();
             Json(pairs).into_response()
+        }
+    }
+}
+
+// =============================================================================
+// GET /audit/daily  — moved here from main.rs's public_routes. Was
+// previously reachable with NO authentication at all even though it returns
+// the same class of aggregate cost/spend data as /admin/overview. Now
+// behind the same admin_key_middleware as every other handler in this file.
+// =============================================================================
+
+#[instrument(skip(state))]
+pub async fn audit_daily_handler(
+    State(state): State<AdminState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let date = match params.get("date") {
+        Some(d) => d,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "date parameter required" })),
+            )
+                .into_response()
+        }
+    };
+
+    match state.cost_tracker.get_daily_report(date).await {
+        Ok(report) => Json(report).into_response(),
+        Err(e) => {
+            error!("Failed to generate report: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Report generation failed" })),
+            )
+                .into_response()
         }
     }
 }

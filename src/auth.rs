@@ -337,3 +337,112 @@ mod tests {
         assert!(keys.has_any());
     }
 }
+// =============================================================================
+// CURSOR BRIDGE
+//
+// Cursor's "Override OpenAI Base URL" integration sends exactly one opaque
+// string as an `Authorization: Bearer <token>` header — no custom headers,
+// no way to send X-API-Key and X-<Provider>-Api-Key separately the way
+// RouterFuel's own auth model expects.
+//
+// This middleware sits in front of api_key_middleware and translates a
+// composite Bearer token into the two headers RouterFuel already knows how
+// to read. It's a pure adapter — resolve_byok_route, ClientProviderKeys,
+// ApiKeyStore are all untouched.
+//
+// Token format (what the user pastes into Cursor's API Key field):
+//
+//     <routerfuel_api_key>:<provider>:<byok_provider_key>
+//
+// e.g.  rf_live_abc123:anthropic:sk-ant-...
+//       rf_live_abc123:openrouter:sk-or-...   (universal fallback — works
+//                                               for any model if you're not
+//                                               sure which provider to pick)
+//
+// Split with splitn(3, ':') so a colon-containing provider key (unusual,
+// but not impossible for some providers) still lands entirely in the third
+// field rather than getting truncated.
+//
+// Only activates when the request has no X-API-Key already — existing API
+// clients that already send X-API-Key + X-<Provider>-Api-Key directly are
+// completely unaffected by this layer.
+// =============================================================================
+
+pub async fn cursor_bridge_middleware(mut request: Request<Body>, next: Next) -> Response {
+    let headers = request.headers();
+
+    if headers.contains_key("x-api-key") {
+        // Caller already speaks RouterFuel's native header pair — nothing
+        // to bridge.
+        return next.run(request).await;
+    }
+
+    let bearer_token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::to_string);
+
+    let Some(token) = bearer_token else {
+        // No composite token and no X-API-Key — let it fall through to
+        // api_key_middleware, which will reject it with the normal 401.
+        return next.run(request).await;
+    };
+
+    let parts: Vec<&str> = token.splitn(3, ':').collect();
+    let [routerfuel_key, provider, byok_key] = parts[..] else {
+        return unauthorized(
+            "Authorization Bearer token is not a valid RouterFuel composite key. \
+             Expected format: <routerfuel_api_key>:<provider>:<byok_provider_key>, \
+             e.g. rf_live_xxx:anthropic:sk-ant-xxx. See /docs/cursor for setup.",
+        );
+    };
+
+    let provider_header_name = match provider.to_lowercase().as_str() {
+        "openai"               => "x-openai-api-key",
+        "anthropic"            => "x-anthropic-api-key",
+        "deepseek"             => "x-deepseek-api-key",
+        "gemini"               => "x-gemini-api-key",
+        "mistral"              => "x-mistral-api-key",
+        "xai" | "grok"         => "x-xai-api-key",
+        "qwen" | "dashscope"   => "x-qwen-api-key",
+        "moonshot" | "kimi"    => "x-moonshot-api-key",
+        "zhipu" | "glm"        => "x-zhipu-api-key",
+        "meta" | "llama"       => "x-meta-api-key",
+        "openrouter"           => "x-openrouter-api-key",
+        other => {
+            return unauthorized_owned(format!(
+                "Unknown provider '{other}' in composite key. Expected one of: openai, \
+                 anthropic, deepseek, gemini, mistral, xai, qwen, moonshot, zhipu, meta, \
+                 openrouter."
+            ));
+        }
+    };
+
+    let Ok(rf_key_value) = routerfuel_key.parse() else {
+        return unauthorized("Composite key's RouterFuel API key segment is not valid header text.");
+    };
+    let Ok(byok_key_value) = byok_key.parse() else {
+        return unauthorized("Composite key's provider API key segment is not valid header text.");
+    };
+
+    request.headers_mut().insert("x-api-key", rf_key_value);
+    request
+        .headers_mut()
+        .insert(provider_header_name, byok_key_value);
+
+    next.run(request).await
+}
+
+// Reuses the `unauthorized()` fn already defined above in this file (used by
+// api_key_middleware) — no need to redefine it here.
+
+// Same as `unauthorized` above but for a message built at runtime (e.g. one
+// that echoes back the unrecognized provider name) — AuthErrorDetail.message
+// is `&'static str`, so an owned String has to be leaked to fit it. This
+// only runs on a malformed-request error path, never in steady-state
+// traffic, so the leak is bounded by bad requests, not by legitimate load.
+fn unauthorized_owned(message: String) -> Response {
+    let leaked: &'static str = Box::leak(message.into_boxed_str());
+    unauthorized(leaked)
+}

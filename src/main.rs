@@ -310,9 +310,6 @@ fn resolve_model(
     request: &ChatCompletionRequest,
     input_tokens: u32,
 ) -> Result<(Provider, String), ApiError> {
-    // Previously nothing checked whether an image-carrying request landed
-    // on a vision-capable model — vision.rs's select_vision_model existed
-    // but was never called from the request path. See src/vision.rs.
     let has_image = request.messages.iter().any(|m| m.content.has_image());
 
     if request.model == "auto" {
@@ -354,10 +351,6 @@ fn resolve_model(
             ApiError::ProviderError("No available providers".to_string())
         })?;
 
-    // Client pinned a concrete model id — if it can't take images and the
-    // request has one, fail clearly instead of silently sending an image to
-    // a text-only model (which just gets ignored or errors deep inside the
-    // provider call with a much less useful message).
     if has_image {
         if let Ok(model) = state.route_engine.find(&request.model) {
             if !model.supports_vision {
@@ -389,7 +382,6 @@ async fn handle_non_streaming(
 
     let start = Instant::now();
 
-    // Extract authenticated client ID injected by auth middleware
     let client_id = headers
         .get("x-routerfuel-client-id")
         .and_then(|v| v.to_str().ok())
@@ -402,10 +394,6 @@ async fn handle_non_streaming(
         "Received chat completion request"
     );
 
-    // ========================================================================
-    // STEP -1: RATE LIMIT, LOOP GUARD, SPEND CAP — all cheap, all before
-    // anything that costs money or calls a provider.
-    // ========================================================================
     let rl_key = client_id.clone().unwrap_or_else(|| "anonymous".to_string());
 
     if state.rate_limiter.check(&rl_key).is_err() {
@@ -429,10 +417,6 @@ async fn handle_non_streaming(
         return Err(ApiError::LoopDetected);
     }
 
-    // ========================================================================
-    // STEP 0: CHECK SEMANTIC CACHE (local ONNX embedding, ~1-5ms, $0 — no
-    // provider is called and nothing is billed to anyone on a cache hit)
-    // ========================================================================
     if !prompt_text.is_empty() {
        if let Some(hit) = state.semantic_cache.lookup(&prompt_text, &request.model).await {
             info!(
@@ -449,10 +433,6 @@ async fn handle_non_streaming(
         }
     }
 
-    // ========================================================================
-    // STEP 1: COUNT INPUT TOKENS PRECISELY
-    // ========================================================================
-
     let input_tokens = tokens::count_request_tokens(&request.messages, &request.model)
         .map_err(|e| {
             error!("Token counting failed: {}", e);
@@ -466,10 +446,6 @@ async fn handle_non_streaming(
         estimated_output_tokens = estimated_output,
         "Counted request tokens"
     );
-
-    // ========================================================================
-    // STEP 2: ROUTING DECISION (<10ms target)
-    // ========================================================================
 
     let routing_start = Instant::now();
 
@@ -491,10 +467,6 @@ async fn handle_non_streaming(
         );
     }
 
-    // ========================================================================
-    // STEP 3: RESOLVE BYOK ROUTE (mandatory — see resolve_byok_route above)
-    // ========================================================================
-
     let provider_keys = ClientProviderKeys::from_headers(&headers);
     let byok = resolve_byok_route(selected_provider, &routing_model_id, &provider_keys)?;
 
@@ -510,9 +482,6 @@ async fn handle_non_streaming(
     let mut effective_request = request.clone();
     effective_request.model = byok.model_id_to_send.clone();
 
-    // Bounded concurrency (src/concurrency.rs) — waits here if RouterFuel is
-    // already at MAX_CONCURRENT_PROVIDER_CALLS in-flight requests, instead
-    // of firing an unbounded number of simultaneous provider connections.
     let _permit = state.concurrency_limiter.acquire().await;
 
     let connector_result = state
@@ -549,9 +518,6 @@ async fn handle_non_streaming(
     let latency_ms = connector_result.latency_ms;
     let output_tokens = connector_result.output_tokens;
 
-    // ========================================================================
-    // STORE IN SEMANTIC CACHE (Background non-blocking task)
-    // ========================================================================
     if !prompt_text.is_empty() {
         if let Ok(response_json) = serde_json::to_string(&response) {
             state.semantic_cache.store(
@@ -561,10 +527,6 @@ async fn handle_non_streaming(
             );
         }
     }
-
-    // ========================================================================
-    // STEP 4: VERIFY OUTPUT TOKENS
-    // ========================================================================
 
     let response_text = response
         .choices
@@ -580,12 +542,6 @@ async fn handle_non_streaming(
             "Verified output tokens"
         );
     }
-
-    // ========================================================================
-    // STEP 5: CALCULATE COST WITH PRECISE TOKENS
-    // (RouterFuel never pays this — it's billed to the client's own BYOK key.
-    // We still track it for the client's own audit/savings dashboard.)
-    // ========================================================================
 
     let (cost_per_1m_input, cost_per_1m_output) = state
         .route_engine
@@ -619,11 +575,6 @@ async fn handle_non_streaming(
 
     state.spend_guard.record_spend(&rl_key, token_cost.total_cost_cents);
 
-    // ========================================================================
-    // TELEMETRY (JSONL side-channel — see src/telemetry.rs; separate from
-    // the Postgres request_logs audit trail, useful for local ROI reports
-    // without a DB round trip). Fire-and-forget: never adds latency here.
-    // ========================================================================
     {
         let mut telemetry_data = TelemetryData::new(
             request_id.clone(),
@@ -646,15 +597,6 @@ async fn handle_non_streaming(
         });
     }
 
-    // ========================================================================
-    // SHADOW MODE — if the client set `shadow_model`, fire an identical
-    // request at it in the background purely for comparison. Never blocks
-    // or affects the response already computed above; see
-    // maybe_fire_shadow_request and migrations/006_shadow_comparisons.sql.
-    // Costs the client a second real bill — that's inherent to what shadow
-    // mode is (you're paying to find out what the alternative would have
-    // cost), not a bug; ENABLE_SHADOW_MODE lets an operator kill it globally.
-    // ========================================================================
     if shadow_mode_enabled() {
         if let Some(shadow_model_id) = request.shadow_model.clone() {
             let output_chars = response
@@ -679,10 +621,6 @@ async fn handle_non_streaming(
         }
     }
 
-    // ========================================================================
-    // STEP 6: RECORD TO POSTGRES (non-blocking via tokio::spawn)
-    // ========================================================================
-
     state.cost_tracker.record_request(
         request_id.clone(),
         byok.provider_to_call,
@@ -696,10 +634,6 @@ async fn handle_non_streaming(
         None,
         true, // is_byok — RouterFuel is BYOK-only; every completed call was billed to a client key
     );
-
-    // ========================================================================
-    // STEP 7: RETURN RESPONSE
-    // ========================================================================
 
     let total_latency = start.elapsed().as_millis() as u64;
 
@@ -715,17 +649,6 @@ async fn handle_non_streaming(
 
 // ============================================================================
 // SHADOW MODE
-//
-// A client sets `shadow_model` on a request; RouterFuel fires an identical
-// request at that model *in addition to* the normally-routed one, purely
-// for comparison — the client only ever sees the primary response, and this
-// never blocks it or can make it fail. Useful for answering "would a
-// cheaper model have given basically the same answer?" with real traffic
-// instead of a synthetic eval.
-//
-// Costs the client a second real bill — that's inherent to what shadow mode
-// is, not a bug. ENABLE_SHADOW_MODE=false disables it globally without a
-// code change if that's not something you want clients able to trigger.
 // ============================================================================
 
 fn shadow_mode_enabled() -> bool {
@@ -784,9 +707,6 @@ fn maybe_fire_shadow_request(
         let byok_shadow = match resolve_byok_route(shadow_provider, &shadow_model_id, &provider_keys) {
             Ok(b) => b,
             Err(_) => {
-                // Client has no key for the shadow provider (direct or via
-                // OpenRouter) — this is expected and common, not an error
-                // worth surfacing loudly; just skip.
                 debug!(shadow_model = %shadow_model_id, "Shadow mode: no BYOK key for shadow provider, skipping");
                 cost_tracker.record_shadow_comparison(ShadowComparison {
                     request_id,
@@ -809,7 +729,7 @@ fn maybe_fire_shadow_request(
 
         shadow_request.model = byok_shadow.model_id_to_send.clone();
         shadow_request.stream = Some(false);
-        shadow_request.shadow_model = None; // don't recurse into another shadow call
+        shadow_request.shadow_model = None;
 
         let _permit = concurrency_limiter.acquire().await;
 
@@ -837,8 +757,6 @@ fn maybe_fire_shadow_request(
                     .map(|c| c.message.content.as_text().len())
                     .unwrap_or(0);
 
-                // This is a second real, billed call — count it against the
-                // client's spend cap same as any other request.
                 spend_guard.record_spend(&spend_key, shadow_cost.total_cost_cents);
 
                 debug!(
@@ -886,7 +804,14 @@ fn maybe_fire_shadow_request(
 }
 
 // ============================================================================
-// HEALTH CHECK & AUDIT
+// HEALTH CHECK
+//
+// NOTE: `/audit/daily` used to be handled here (`audit_daily_handler`) and
+// was mounted in `public_routes` with no authentication at all, despite
+// returning aggregate cross-client cost data. It has been MOVED to
+// src/admin.rs (`admin::audit_daily_handler`) and is now registered under
+// `admin_routes`, behind the same `X-Admin-Key` requirement as every other
+// spend-reporting endpoint. See admin.rs for the handler itself.
 // ============================================================================
 async fn dashboard_handler() -> Html<&'static str> {
     Html(include_str!("../static/dashboard.html"))
@@ -923,26 +848,6 @@ async fn models_handler(State(state): State<AppState>) -> Json<serde_json::Value
     Json(json!({ "object": "list", "data": models }))
 }
 
-async fn audit_daily_handler(
-    State(state): State<AppState>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let date = params
-        .get("date")
-        .ok_or_else(|| ApiError::BadRequest("date parameter required".to_string()))?;
-
-    let report = state
-        .cost_tracker
-        .get_daily_report(date)
-        .await
-        .map_err(|e| {
-            error!("Failed to generate report: {}", e);
-            ApiError::InternalError("Report generation failed".to_string())
-        })?;
-
-    Ok(Json(serde_json::to_value(report).unwrap()))
-}
-
 // ============================================================================
 // MAIN SERVER
 // ============================================================================
@@ -959,10 +864,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     dotenv::dotenv().ok();
 
-    // NOTE: RouterFuel intentionally reads no OPENAI_API_KEY / ANTHROPIC_API_KEY
-    // / etc. here. It never holds a provider key of its own — see
-    // connectors.rs and the BYOK resolution logic in this file. The only
-    // secrets it needs are its own database and its own client auth store.
     let database_url = std::env::var("DATABASE_URL")
         .expect("DATABASE_URL environment variable not set");
 
@@ -987,16 +888,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cost_tracker = Arc::new(CostTracker::new(pool.clone()));
     let rate_limiter = Arc::new(RateLimiter::new());
 
-    // Per-client rate-limit tiers — from ROUTERFUEL_CLIENT_TIERS and/or the
-    // client_tiers table (migrations/003_client_tiers.sql already creates
-    // it). Previously main.rs just hardcoded UserTier::Pro for everyone;
-    // this is what actually makes per-client tiers real. See
-    // src/client_registry.rs.
     let client_tiers_raw = std::env::var("ROUTERFUEL_CLIENT_TIERS").unwrap_or_default();
     client_registry::load_all_tiers(&pool, &rate_limiter, &client_tiers_raw, TierConfig::PRO).await;
 
-    // Runaway-agent protection — see src/guardrails.rs. Both are cheap,
-    // in-memory, per-process checks that run before any provider is called.
     let loop_repeat_threshold: usize = std::env::var("LOOP_GUARD_REPEAT_THRESHOLD")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -1013,7 +907,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let max_spend_cents_per_client: f64 = std::env::var("MAX_SPEND_CENTS_PER_CLIENT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(5_000.0); // $50 default — tune per your client base
+        .unwrap_or(5_000.0);
     let spend_window_secs: u64 = std::env::var("SPEND_GUARD_WINDOW_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -1031,11 +925,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Runaway-agent guardrails configured"
     );
 
-    // Pull the full public OpenRouter catalog (300+ models) so BYOK clients
-    // who only hold an OpenRouter key still get first-class routing across
-    // everything OpenRouter hosts, not just the curated direct-integration
-    // list in route_engine.rs. Non-fatal on failure — the curated registry
-    // works fine without it, and this is a live third-party endpoint.
     let catalog_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -1060,10 +949,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Local ONNX embedder for the semantic cache. If the model files aren't
-    // present yet (see src/embedder.rs for what to download), the server
-    // still starts — the cache just runs in "always miss" mode instead of
-    // failing to boot.
     let embedding_model_path = std::env::var("EMBEDDING_MODEL_PATH")
         .unwrap_or_else(|_| "./models/embedding.onnx".to_string());
     let embedding_tokenizer_path = std::env::var("EMBEDDING_TOKENIZER_PATH")
@@ -1087,9 +972,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let connector_manager = Arc::new(ConnectorManager::new(Arc::clone(&circuit_breaker)));
 
-    // JSONL telemetry side-channel — see src/telemetry.rs. Separate from
-    // the Postgres request_logs audit trail; useful for local ROI reports
-    // without a DB round trip, and survives even if Postgres is down.
     let telemetry_dir = std::env::var("TELEMETRY_OUTPUT_DIR").unwrap_or_else(|_| "./telemetry".to_string());
     let telemetry_buffer_size: usize = std::env::var("TELEMETRY_BUFFER_SIZE")
         .ok()
@@ -1112,7 +994,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         route_engine,
         connector_manager,
-        cost_tracker,
+        cost_tracker: Arc::clone(&cost_tracker),
         circuit_breaker,
         semantic_cache,
         rate_limiter: Arc::clone(&rate_limiter),
@@ -1133,10 +1015,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
 .layer(middleware::from_fn(cursor_bridge_middleware));
     
+    // FIX: `/audit/daily` removed from here. It used to be public (same
+    // tier as /health and /v1/models) despite returning aggregate spend
+    // data across all clients. It's now registered under `admin_routes`
+    // below, served by `admin::audit_daily_handler`, and requires
+    // X-Admin-Key like every other cost/spend endpoint.
     let public_routes = Router::new()
     .route("/health", get(health_handler))
     .route("/v1/models", get(models_handler))
-    .route("/audit/daily", get(audit_daily_handler))
     .route("/admin/dashboard", get(dashboard_handler)) 
     .with_state(state);
 
@@ -1155,6 +1041,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let admin_state = AdminState {
         pool: Arc::new(pool.clone()),
         rate_limiter: Arc::clone(&rate_limiter),
+        cost_tracker,
     };
 
     let admin_routes = Router::new()
@@ -1166,6 +1053,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/admin/timeline", get(admin::timeline_handler))
         .route("/admin/rate-limits", get(admin::rate_limits_handler))
         .route("/admin/shadow", get(admin::shadow_stats_handler))
+        .route("/audit/daily", get(admin::audit_daily_handler)) // moved from public_routes — see FIX note above
         .with_state(admin_state)
         .layer(middleware::from_fn_with_state(admin_key, admin::admin_key_middleware));
 

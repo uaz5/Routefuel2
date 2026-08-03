@@ -14,12 +14,12 @@ RouterFuel never holds a billable key of its own. Every request is billed to *yo
 - **Semantic caching** — a local ONNX embedding model (no external API cost) matches semantically similar prompts and serves cached responses instead of re-calling a provider
 - **Cost tracking & audit trail** — every request is logged with token counts, cost, latency, and savings vs. a GPT-4o baseline
 - **Circuit breaker** — automatically stops sending traffic to a provider that's returning errors, and probes it back into rotation once it recovers
-- **Rate limiting & tiers** — per-client rate limits (free / pro / enterprise), configurable via env var or a Postgres table, no redeploy needed to change a client's tier
+- **Rate limiting & tiers** — per-client rate limits (free / pro / enterprise), configurable via env var or a Postgres table; tier changes take effect on the **next server restart** (tiers are loaded once at startup, not watched live)
 - **Concurrency limiting** — bounds in-flight provider calls so a traffic spike doesn't get you rate-limited or IP-blocked upstream
 - **Guardrails** — LoopGuard flags a client stuck retrying the same prompt; SpendGuard hard-caps per-client spend in a rolling window
-- **Shadow-mode A/B testing** — fire a second, comparison-only call at a different model alongside the real one, without affecting what the client receives
+- **Shadow-mode A/B testing** — fire a second, comparison-only call at a different model alongside the real one, without affecting what the client receives. **Enabled by default** — any client can trigger it by sending `shadow_model` on a request, and it bills a second real call to their BYOK key
 - **Streaming** — full SSE streaming support for Anthropic, Gemini, and every OpenAI-compatible provider
-- **Admin dashboard** — a self-hosted, no-build-step web UI at `/admin/dashboard` visualizing spend, cache performance, per-model and per-client cost, the request timeline, rate-limit tiers, and shadow-mode comparisons — reads the `/admin/*` endpoints below in real time
+- **Admin dashboard** — a self-hosted, no-build-step web UI at `/admin/dashboard` visualizing spend, cache performance, per-model and per-client cost, the request timeline, rate-limit tiers, and shadow-mode comparisons — reads the `/admin/*` endpoints below in real time. The dashboard *page* itself is public; the data endpoints it calls each require `X-Admin-Key`
 - **Cursor integration** — point Cursor's custom OpenAI-compatible model settings straight at RouterFuel and route your editor's requests through your own provider keys
 
 ## Requirements
@@ -56,16 +56,16 @@ Migrations run automatically on startup too, via `sqlx::migrate!` in `main.rs`.
 | `ROUTERFUEL_API_KEYS`           | no       | empty         | Client API keys, format `sha256hex:ClientName,sha256hex:ClientName` |
 | `ROUTERFUEL_CLIENT_TIERS`       | no       | empty         | Per-client rate tiers, format `raw_key:pro,raw_key:enterprise`      |
 | `ROUTERFUEL_ADMIN_KEY`          | no       | empty         | Key required to access `/admin/*` endpoints (`X-Admin-Key` header)  |
-| `EMBEDDING_MODEL_PATH`          | no       | —             | Path to your local ONNX embedding model (enables semantic cache)    |
-| `EMBEDDING_TOKENIZER_PATH`      | no       | —             | Path to the matching tokenizer.json                                 |
+| `EMBEDDING_MODEL_PATH`          | no       | `./models/embedding.onnx` | Path to your local ONNX embedding model (enables semantic cache) |
+| `EMBEDDING_TOKENIZER_PATH`      | no       | `./models/tokenizer.json` | Path to the matching tokenizer.json                       |
 | `LOOP_GUARD_REPEAT_THRESHOLD`   | no       | 4             | Repeats of an identical prompt before it's flagged as a loop        |
 | `LOOP_GUARD_WINDOW_SECS`        | no       | 60            | Window LoopGuard checks over                                        |
 | `MAX_SPEND_CENTS_PER_CLIENT`    | no       | 5000          | Per-client spend cap (cents) per window                             |
 | `SPEND_GUARD_WINDOW_SECS`       | no       | 3600          | SpendGuard rolling window, in seconds                               |
-| `MAX_CONCURRENT_PROVIDER_CALLS` | no       | —             | Caps simultaneous in-flight provider calls                          |
-| `ENABLE_SHADOW_MODE`            | no       | false         | Enables shadow-mode A/B comparison calls                            |
+| `MAX_CONCURRENT_PROVIDER_CALLS` | no       | 200           | Caps simultaneous in-flight provider calls                          |
+| `ENABLE_SHADOW_MODE`            | no       | **true**      | Enables shadow-mode A/B comparison calls — on by default; set to `false` to disable |
 | `TELEMETRY_OUTPUT_DIR`          | no       | `./telemetry` | Where telemetry JSONL files are written                             |
-| `TELEMETRY_BUFFER_SIZE`         | no       | —             | Records buffered before a telemetry flush                           |
+| `TELEMETRY_BUFFER_SIZE`         | no       | 500           | Records buffered before a telemetry flush                           |
 | `HOST`                          | no       | `0.0.0.0`     | Bind address                                                        |
 | `PORT`                          | no       | `3000`        | Bind port                                                           |
 
@@ -105,7 +105,7 @@ src/
   cost_tracker.rs           — request logging + cost/savings reports
   telemetry.rs              — JSONL telemetry + ROI reports
   streaming.rs              — SSE streaming handler
-  admin.rs                  — /admin/* dashboard data endpoints
+  admin.rs                  — /admin/* dashboard data endpoints, incl. /audit/daily
   openrouter_catalog.rs     — pulls OpenRouter's public model list into the registry
 static/
   dashboard.html            — self-contained admin dashboard UI, served at /admin/dashboard

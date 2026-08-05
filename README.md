@@ -28,7 +28,23 @@ RouterFuel never holds a billable key of its own. Every request is billed to *yo
 - PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector) extension installed
 - A local ONNX sentence-embedding model + tokenizer (e.g. [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)) for semantic caching — download the `.onnx` and `tokenizer.json` files and point RouterFuel at them (see below)
 
-## Setup
+## Quickstart (Docker)
+
+```bash
+git clone https://github.com/uaz5/Routerfuel.git
+cd Routerfuel
+cp .env.example .env        # then fill in ROUTERFUEL_ADMIN_KEY at minimum
+./scripts/generate-key.sh "MyFirstClient"   # copy the hash line into .env's ROUTERFUEL_API_KEYS
+docker compose up --build
+```
+
+This starts Postgres with `pgvector` pre-installed and runs migrations automatically on first boot — no manual database setup. RouterFuel listens on `http://localhost:3000`.
+
+Semantic caching (local ONNX embeddings) stays off until you drop a model + tokenizer into `./models/` — see `docker-compose.yml` for the exact paths. Everything else works without it.
+
+**Heads up if you're building this yourself:** the container build needs network access (the `ort` crate downloads ONNX Runtime binaries during compilation), and the ONNX shared library path is the one part of this setup that's genuinely a little fragile across environments — see the comments at the top of the `Dockerfile` if `docker compose up` starts fine but logs a warning that the embedding model didn't load. The gateway itself runs correctly either way; only semantic caching is affected.
+
+## Manual Setup (no Docker)
 
 **1. Clone and build**
 
@@ -110,6 +126,11 @@ src/
 static/
   dashboard.html            — self-contained admin dashboard UI, served at /admin/dashboard
 migrations/                — Postgres schema, run in numeric order
+scripts/
+  generate-key.sh           — generates a client API key + its SHA-256 hash
+Dockerfile                  — multi-stage build (see Quickstart above)
+docker-compose.yml          — RouterFuel + Postgres/pgvector wired together
+.env.example                — copy to .env before `docker compose up`
 ```
 
 ## License

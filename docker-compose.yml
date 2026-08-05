@@ -1,0 +1,65 @@
+# =============================================================================
+# docker-compose.yml — RouterFuel
+#
+# `docker compose up --build` gets you: Postgres with pgvector pre-installed,
+# migrations run automatically on RouterFuel's first boot (sqlx::migrate! in
+# main.rs), and the gateway listening on :3000.
+#
+# Semantic caching stays OFF until you drop an ONNX embedding model +
+# tokenizer into ./models — see the `models` volume below. Everything else
+# works without it; the gateway just won't cache semantically similar
+# prompts (exact-hash cache still applies regardless — see
+# src/semantic_cache.rs).
+# =============================================================================
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: routerfuel
+      POSTGRES_PASSWORD: routerfuel
+      POSTGRES_DB: routerfuel
+    volumes:
+      - routerfuel_pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U routerfuel -d routerfuel"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://routerfuel:routerfuel@db:5432/routerfuel
+      HOST: 0.0.0.0
+      PORT: 3000
+
+      # See .env.example — copy it to .env and fill these in before running.
+      ROUTERFUEL_API_KEYS: ${ROUTERFUEL_API_KEYS:-}
+      ROUTERFUEL_CLIENT_TIERS: ${ROUTERFUEL_CLIENT_TIERS:-}
+      ROUTERFUEL_ADMIN_KEY: ${ROUTERFUEL_ADMIN_KEY:-}
+      ENABLE_SHADOW_MODE: ${ENABLE_SHADOW_MODE:-true}
+
+      # Only takes effect if you've dropped model files into ./models — see
+      # the volume mount below. If the files aren't there, embedder::load()
+      # fails gracefully at startup (logged, not fatal) and semantic caching
+      # just stays off.
+      EMBEDDING_MODEL_PATH: /app/models/embedding.onnx
+      EMBEDDING_TOKENIZER_PATH: /app/models/tokenizer.json
+    ports:
+      - "3000:3000"
+    volumes:
+      # Optional. Drop an ONNX sentence-embedding model (e.g. all-MiniLM-L6-v2,
+      # converted to .onnx) + its tokenizer.json in here to enable semantic
+      # caching. Leave empty and the gateway runs fine without it.
+      - ./models:/app/models:ro
+
+volumes:
+  routerfuel_pgdata:

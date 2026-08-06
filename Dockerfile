@@ -65,6 +65,14 @@ COPY src ./src
 COPY migrations ./migrations
 COPY static ./static
 
+# CRITICAL FIX: Docker's COPY can leave file mtimes that Cargo's
+# change-detection doesn't register as "newer" than the dummy build above —
+# so `cargo build --release` here can silently decide nothing changed and
+# reuse the old `fn main() {}` stub binary, producing a tiny, broken binary
+# with none of the app's real dependencies linked in. Touching every source
+# file forces Cargo to see them as modified and actually recompile.
+RUN find src -type f -exec touch {} + && find migrations -type f -exec touch {} +
+
 RUN cargo build --release
 
 # Collect any ONNX Runtime shared libraries into a directory that's

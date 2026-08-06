@@ -27,13 +27,12 @@
 # =============================================================================
 
 # ---- Build stage ----
-# Pinned to the floating "1-bookworm" tag (always latest stable Rust 1.x) —
-# not a fixed version like "1.82" — because Cargo.lock was generated with
-# whatever Rust version is on the host machine, and a fixed older tag here
-# can fall behind what the lockfile actually needs (this bit us once
-# already: home v0.5.12 requires the `edition2024` Cargo feature, which
-# needs Cargo 1.85+; the original 1.82 pin didn't have it).
-FROM rust:1-bookworm AS builder
+# Pinned to Trixie, not Bookworm — the `ort` crate's prebuilt ONNX Runtime
+# binary requires glibc 2.38+ (specifically the __isoc23_strtol/strtoll/
+# strtoull symbols, added in that glibc release). Bookworm ships glibc 2.36
+# and fails to link with "undefined symbol: __isoc23_strtoll" as a result —
+# this bit us once already. Trixie ships glibc 2.39+, which has them.
+FROM rust:1-trixie AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
@@ -83,7 +82,11 @@ RUN mkdir -p /app/onnxlibs \
     && cp /app/target/release/*.so* /app/onnxlibs/ 2>/dev/null || true
 
 # ---- Runtime stage ----
-FROM debian:bookworm-slim
+# Also Trixie, not Bookworm — the compiled binary statically links parts of
+# ONNX Runtime that require glibc 2.38+ symbols (see the builder-stage
+# comment above). The runtime image's glibc has to satisfy the same
+# requirement as whatever the binary was linked against.
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \

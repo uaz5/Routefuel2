@@ -27,7 +27,13 @@
 # =============================================================================
 
 # ---- Build stage ----
-FROM rust:1.82-bookworm AS builder
+# Pinned to the floating "1-bookworm" tag (always latest stable Rust 1.x) —
+# not a fixed version like "1.82" — because Cargo.lock was generated with
+# whatever Rust version is on the host machine, and a fixed older tag here
+# can fall behind what the lockfile actually needs (this bit us once
+# already: home v0.5.12 requires the `edition2024` Cargo feature, which
+# needs Cargo 1.85+; the original 1.82 pin didn't have it).
+FROM rust:1-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \

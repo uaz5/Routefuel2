@@ -186,14 +186,17 @@ fn resolve_byok_route(
         });
     }
 
-    if let Some(or_key) = keys.openrouter.as_deref() {
+  if let Some(or_key) = keys.openrouter.as_deref() {
     let prefix = selected_provider.openrouter_prefix();
     let already_prefixed = requested_model.starts_with(&format!("{prefix}/"));
     let model_id_to_send = if selected_provider == Provider::OpenRouter || already_prefixed {
         requested_model.to_string()
+    } else if let Some(override_slug) = crate::route_engine::openrouter_slug_override(requested_model) {
+        override_slug.to_string()
     } else {
         format!("{prefix}/{requested_model}")
     };
+      
     return Ok(ByokRoute {
         provider_to_call: Provider::OpenRouter,
         model_id_to_send,

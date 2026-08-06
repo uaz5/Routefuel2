@@ -519,6 +519,12 @@ impl RouteEngine {
         Ok(())
     }
 }
+pub fn openrouter_slug_override(direct_api_id: &str) -> Option<&'static str> {
+    match direct_api_id {
+        "gemini-3-flash" => Some("google/gemini-3-flash-preview"),
+        _ => None,
+    }
+}
 
 impl Default for RouteEngine {
     fn default() -> Self { Self::new() }

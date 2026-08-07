@@ -235,6 +235,15 @@ async fn chat_completions_handler(
 /// mean buffering the whole thing anyway, which defeats the point of
 /// streaming; a cache hit for the same prompt still short-circuits the next
 /// *non*-streaming call.
+///
+/// NOTE: unlike handle_non_streaming, this path does not yet reserve
+/// against SpendGuard at all (no check() or try_reserve() call, and no
+/// record_spend()/reconcile() anywhere on the streaming completion path) —
+/// a client using only streaming requests currently accrues no spend
+/// against their cap regardless of concurrency. That's a separate, larger
+/// fix (needs spend_guard + rl_key threaded into streaming::stream_handler
+/// so the audit_tx receiver task can reserve/reconcile once real usage is
+/// known) and is intentionally not bundled into this revision.
 async fn handle_streaming(headers: HeaderMap, state: AppState, request: ChatCompletionRequest) -> Response {
     let request_id = Uuid::new_v4().to_string();
     let client_id = headers
@@ -404,9 +413,11 @@ async fn handle_non_streaming(
         return Err(ApiError::RateLimited);
     }
 
-    if !state.spend_guard.check(&rl_key) {
-        return Err(ApiError::SpendCapExceeded);
-    }
+    // FIX: the plain spend_guard.check() that used to sit here has moved
+    // down past routing + pricing lookup, where it's replaced by
+    // try_reserve() — see below. Loop guard and semantic cache lookup stay
+    // in their original position (before routing), since neither depends
+    // on knowing the resolved model's price.
 
     let prompt_text = request
         .messages
@@ -470,8 +481,43 @@ async fn handle_non_streaming(
         );
     }
 
+    // FIX: pricing lookup moved up to here (it used to happen much later,
+    // right before cost_saved was calculated) so we have a real cost
+    // estimate to reserve against SpendGuard, instead of a bare boolean
+    // check with nothing actually held. cost_per_1m_input/output are reused
+    // further down when computing the real token_cost from the actual
+    // response — no second lookup.
+    let (cost_per_1m_input, cost_per_1m_output) = state
+        .route_engine
+        .get_pricing(&routing_model_id)
+        .map_err(|e| {
+            error!("Pricing lookup failed: {}", e);
+            ApiError::InternalError("Pricing lookup failed".to_string())
+        })?;
+
+    let estimated_cost = TokenCostBreakdown::new(
+        input_tokens,
+        estimated_output,
+        cost_per_1m_input,
+        cost_per_1m_output,
+    );
+
+    // FIX: was `if !state.spend_guard.check(&rl_key) { return Err(...) }`
+    // — a plain read with nothing reserved, so concurrent requests from the
+    // same client could all pass before any of them recorded real spend.
+    // try_reserve() checks and reserves the estimate atomically.
+    if !state.spend_guard.try_reserve(&rl_key, estimated_cost.total_cost_cents) {
+        return Err(ApiError::SpendCapExceeded);
+    }
+
     let provider_keys = ClientProviderKeys::from_headers(&headers);
-    let byok = resolve_byok_route(selected_provider, &routing_model_id, &provider_keys)?;
+    let byok = resolve_byok_route(selected_provider, &routing_model_id, &provider_keys)
+        .map_err(|e| {
+            // FIX: release the reservation — no provider was ever called,
+            // so nothing was actually billed.
+            state.spend_guard.release(&rl_key, estimated_cost.total_cost_cents);
+            e
+        })?;
 
     if byok.used_openrouter_fallback {
         info!(
@@ -493,6 +539,10 @@ async fn handle_non_streaming(
         .await
         .map_err(|e| {
             error!("Connector error: {}", e);
+
+            // FIX: release the reservation — the call failed, nothing was
+            // billed to the client's provider account.
+            state.spend_guard.release(&rl_key, estimated_cost.total_cost_cents);
 
             state.cost_tracker.record_error(
                 request_id.clone(),
@@ -546,14 +596,9 @@ async fn handle_non_streaming(
         );
     }
 
-    let (cost_per_1m_input, cost_per_1m_output) = state
-        .route_engine
-        .get_pricing(&routing_model_id)
-        .map_err(|e| {
-            error!("Pricing lookup failed: {}", e);
-            ApiError::InternalError("Pricing lookup failed".to_string())
-        })?;
-
+    // NOTE: pricing lookup that used to happen here is gone — cost_per_1m_input
+    // / cost_per_1m_output were already fetched above, before the SpendGuard
+    // reservation, and are reused here to build the real token_cost.
     let token_cost =
         TokenCostBreakdown::new(input_tokens, output_tokens, cost_per_1m_input, cost_per_1m_output);
 
@@ -576,7 +621,11 @@ async fn handle_non_streaming(
         "Calculated costs (billed to client's own BYOK key, not RouterFuel)"
     );
 
-    state.spend_guard.record_spend(&rl_key, token_cost.total_cost_cents);
+    // FIX: was `state.spend_guard.record_spend(&rl_key, token_cost.total_cost_cents)`
+    // — added the real cost on top of the estimate that was never reserved
+    // in the old code, double counting relative to nothing. Now reconciles
+    // the reservation made above (estimated_cost) to the real token_cost.
+    state.spend_guard.reconcile(&rl_key, estimated_cost.total_cost_cents, token_cost.total_cost_cents);
 
     {
         let mut telemetry_data = TelemetryData::new(
@@ -684,9 +733,38 @@ fn maybe_fire_shadow_request(
     let spend_key = client_id.clone().unwrap_or_else(|| "anonymous".to_string());
 
     tokio::spawn(async move {
+        // FIX: previously this task never called spend_guard at all until
+        // AFTER the shadow call completed (record_spend only) — meaning a
+        // client already at or over their spend cap could keep triggering
+        // fully-billed shadow calls indefinitely via `shadow_model`, since
+        // only the primary request path ever checked the cap. Reserve
+        // against the cap (using the primary call's cost as a same-order-
+        // of-magnitude estimate) before the shadow call is fired at all.
+        if !spend_guard.try_reserve(&spend_key, primary_cost_cents) {
+            debug!(shadow_model = %shadow_model_id, "Shadow mode: client over spend cap, skipping shadow call");
+            cost_tracker.record_shadow_comparison(ShadowComparison {
+                request_id,
+                client_id,
+                primary_model,
+                primary_provider: primary_provider.to_string(),
+                primary_cost_cents,
+                primary_latency_ms,
+                primary_output_chars,
+                shadow_model: shadow_model_id,
+                shadow_provider: "skipped".to_string(),
+                shadow_cost_cents: None,
+                shadow_latency_ms: None,
+                shadow_output_chars: None,
+                shadow_error: Some("client over spend cap — shadow call skipped".to_string()),
+            });
+            return;
+        }
+
         let shadow_provider = match route_engine.select_provider(&shadow_model_id) {
             Ok(p) => p,
             Err(e) => {
+                // FIX: release the reservation — no shadow call happened.
+                spend_guard.release(&spend_key, primary_cost_cents);
                 debug!(shadow_model = %shadow_model_id, "Shadow mode: unknown model ({e}), skipping");
                 cost_tracker.record_shadow_comparison(ShadowComparison {
                     request_id,
@@ -710,6 +788,8 @@ fn maybe_fire_shadow_request(
         let byok_shadow = match resolve_byok_route(shadow_provider, &shadow_model_id, &provider_keys) {
             Ok(b) => b,
             Err(_) => {
+                // FIX: release the reservation — no shadow call happened.
+                spend_guard.release(&spend_key, primary_cost_cents);
                 debug!(shadow_model = %shadow_model_id, "Shadow mode: no BYOK key for shadow provider, skipping");
                 cost_tracker.record_shadow_comparison(ShadowComparison {
                     request_id,
@@ -760,7 +840,9 @@ fn maybe_fire_shadow_request(
                     .map(|c| c.message.content.as_text().len())
                     .unwrap_or(0);
 
-                spend_guard.record_spend(&spend_key, shadow_cost.total_cost_cents);
+                // FIX: was `spend_guard.record_spend(&spend_key, shadow_cost.total_cost_cents)`
+                // — reconcile the reservation made above to the real cost instead.
+                spend_guard.reconcile(&spend_key, primary_cost_cents, shadow_cost.total_cost_cents);
 
                 debug!(
                     shadow_model = %shadow_model_id,
@@ -786,6 +868,8 @@ fn maybe_fire_shadow_request(
                 });
             }
             Err(e) => {
+                // FIX: release the reservation — the call failed, nothing was billed.
+                spend_guard.release(&spend_key, primary_cost_cents);
                 cost_tracker.record_shadow_comparison(ShadowComparison {
                     request_id,
                     client_id,
@@ -964,7 +1048,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(e) => {
             warn!(
-                "Could not load local embedding model ({e}). Semantic cache disabled until \
+                "Could not load local embedding model ({e}). Semantic caching disabled until \
                  {embedding_model_path} and {embedding_tokenizer_path} are present."
             );
             None

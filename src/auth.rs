@@ -253,6 +253,7 @@ pub async fn api_key_middleware(
             unauthorized("Invalid API key")
         }
     }
+}
 
 // =============================================================================
 // Helpers
@@ -281,9 +282,11 @@ mod tests {
     #[test]
     fn valid_key_returns_client_name() {
         let store = store_with("rf_live_supersecret", "AcmeCorp");
-        assert_eq!(store.validate("rf_live_supersecret"), Some("AcmeCorp"));
+        let hash = sha256_hex("rf_live_supersecret");
+        // FIX: validate() now returns Some((hash, name)) instead of Some(name)
+        assert_eq!(store.validate("rf_live_supersecret"), Some((hash.as_str(), "AcmeCorp")));
     }
-
+    
     #[test]
     fn wrong_key_returns_none() {
         let store = store_with("rf_live_supersecret", "AcmeCorp");
@@ -296,6 +299,7 @@ mod tests {
         assert!(store.is_empty());
     }
 
+    
     #[test]
     fn multiple_keys_parsed_correctly() {
         let k1 = sha256_hex("key_one");
@@ -303,8 +307,9 @@ mod tests {
         let env_str = format!("{k1}:ClientA,{k2}:ClientB");
         let store = ApiKeyStore::from_env_string(&env_str);
         assert_eq!(store.len(), 2);
-        assert_eq!(store.validate("key_one"), Some("ClientA"));
-        assert_eq!(store.validate("key_two"), Some("ClientB"));
+        // FIX: same tuple-return update
+        assert_eq!(store.validate("key_one"), Some((k1.as_str(), "ClientA")));
+        assert_eq!(store.validate("key_two"), Some((k2.as_str(), "ClientB")));
     }
 
     #[test]

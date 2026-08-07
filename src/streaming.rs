@@ -1,10 +1,22 @@
 // =============================================================================
-// src/streaming.rs  — RouterFuel v0.7 (FIXED)
+// src/streaming.rs  — RouterFuel v0.7
+//
+// FIX (this revision): the streaming path never touched SpendGuard at all
+// — no check before firing, and (unlike the non-streaming path) no
+// record/reconcile after, since the audit_tx task only ever fed
+// cost_tracker. A client using only streaming requests accrued zero spend
+// against their cap regardless of how much they actually used. stream_handler
+// now takes spend_guard/rl_key/estimated_cost_cents; main.rs reserves before
+// calling this, and the audit task here reconciles once real usage is known.
+// On any early failure path (send error, non-2xx status) the reservation is
+// released immediately rather than waiting for the audit task, since those
+// paths never reach it.
 // =============================================================================
 
 use crate::concurrency::ConcurrencyLimiter;
 use crate::connectors::{provider_base_url, to_gemini_body, ChatCompletionRequest, Provider};
 use crate::cost_tracker::CostTracker;
+use crate::guardrails::SpendGuard;
 use crate::route_engine::RouteEngine;
 use crate::tokens::TokenCostBreakdown;
 use async_stream::try_stream;
@@ -90,7 +102,7 @@ struct GeminiStreamUsage {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[instrument(skip(route_engine, cost_tracker, http_client, req, api_key, concurrency_limiter))]
+#[instrument(skip(route_engine, cost_tracker, http_client, req, api_key, concurrency_limiter, spend_guard))]
 pub async fn stream_handler(
     request_id: String,
     provider: Provider,
@@ -103,6 +115,11 @@ pub async fn stream_handler(
     cost_tracker: Arc<CostTracker>,
     http_client: reqwest::Client,
     concurrency_limiter: Arc<ConcurrencyLimiter>,
+    // FIX: new params — spend_guard + the reservation key/amount main.rs
+    // already reserved before calling this function.
+    spend_guard: Arc<SpendGuard>,
+    rl_key: String,
+    estimated_cost_cents: f64,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let start = Instant::now();
 
@@ -113,6 +130,8 @@ pub async fn stream_handler(
     let request_id_clone = request_id.clone();
     let model_api_id_clone = model_api_id.clone();
     let client_id_clone = client_id.clone();
+    let spend_guard_clone = Arc::clone(&spend_guard);
+    let rl_key_clone = rl_key.clone();
 
     tokio::spawn(async move {
         if let Some(payload) = audit_rx.recv().await {
@@ -129,6 +148,11 @@ pub async fn stream_handler(
             let baseline_cost =
                 TokenCostBreakdown::new(payload.input_tokens, payload.output_tokens, 500.0, 3000.0);
 
+            // FIX: reconcile the reservation main.rs made before this
+            // stream started against the real cost now known — this is the
+            // only place a streaming request's spend ever gets recorded.
+            spend_guard_clone.reconcile(&rl_key_clone, estimated_cost_cents, token_cost.total_cost_cents);
+
             cost_tracker_clone.record_request(
                 request_id_clone,
                 payload.provider,
@@ -142,6 +166,12 @@ pub async fn stream_handler(
                 Some("streaming".to_string()),
                 is_byok,
             );
+        } else {
+            // FIX: audit_tx was dropped without ever sending — the stream
+            // ended (or errored) before reaching any of the send points
+            // below. Release the reservation rather than leaving it stuck
+            // against the client's cap forever.
+            spend_guard_clone.release(&rl_key_clone, estimated_cost_cents);
         }
     });
 
@@ -198,6 +228,8 @@ pub async fn stream_handler(
             Ok(r) => r,
             Err(e) => {
                 error!("Streaming request failed: {}", e);
+                // audit_tx drops here without sending -> the audit task's
+                // else-branch above releases the reservation.
                 yield Event::default().data(format!(r#"{{"error":"upstream failed: {e}"}}"#));
                 return;
             }
@@ -207,11 +239,11 @@ pub async fn stream_handler(
             let status = response.status().as_u16();
             let body_text = response.text().await.unwrap_or_default();
             error!(status = status, body = %body_text, "Provider returned error");
+            // Same as above — audit_tx drops unsent, reservation released.
             yield Event::default().data(format!(r#"{{"error":"provider error {status}"}}"#));
             return;
         }
 
-        // FIXED: Use .bytes_stream() - it exists but we need to handle it correctly
         let mut byte_stream = response.bytes_stream();
 
         let mut full_text = String::new();
@@ -219,7 +251,6 @@ pub async fn stream_handler(
         let mut output_tokens = 0u32;
         let mut chunk_count = 0u32;
 
-        // FIXED: Use `while let Some(Ok(bytes))`
         while let Some(chunk) = byte_stream.next().await {
             let bytes = match chunk {
                 Ok(b) => b,
@@ -229,7 +260,6 @@ pub async fn stream_handler(
                 }
             };
 
-            // Convert bytes to string
             let text = match String::from_utf8(bytes.to_vec()) {
                 Ok(t) => t,
                 Err(_) => continue,
@@ -318,6 +348,11 @@ pub async fn stream_handler(
             }
         }
 
+        // Loop ended without a [DONE]/message_stop (e.g. a mid-stream read
+        // error via `break` above) — still send whatever was accumulated so
+        // the reservation gets reconciled to the real (possibly partial)
+        // cost instead of the audit task's release-on-drop path treating a
+        // partially-successful stream as a total failure.
         let _ = audit_tx.send(AuditPayload {
             provider, input_tokens, output_tokens,
             latency_ms: start.elapsed().as_millis() as u64,

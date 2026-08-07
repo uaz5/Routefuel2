@@ -120,7 +120,27 @@ impl RouteEngine {
         Self {
             models: RwLock::new(Self::build_registry()),
         }
+    } 
+
+    /// FIX (#5): returns true if `candidate` exists as a literal id in the
+    /// registry under Provider::OpenRouter — i.e. it's a real slug
+    /// OpenRouter's own catalog reported at startup (see
+    /// openrouter_catalog.rs's extend_registry call in main.rs), not just
+    /// an assumed "{prefix}/{model}" formula. resolve_byok_route in
+    /// main.rs uses this to verify a guessed OpenRouter slug before
+    /// sending it, instead of trusting the formula blindly — this is the
+    /// same class of bug that broke gemini-3-flash (OpenRouter's real
+    /// slug needed a "-preview" suffix the formula didn't produce), just
+    /// generalized into a check instead of a single hand-added exception.
+    pub fn openrouter_catalog_has(&self, candidate: &str) -> bool {
+        self.models
+            .read()
+            .iter()
+            .any(|m| m.provider == Provider::OpenRouter && m.api_id == candidate)
     }
+
+    // The rest of your methods (build_registry, select, select_for_task, etc.) continue here...
+}
 
     /// Master registry — every model RouterFuel knows how to route to,
     /// as of July 2026. Cost figures are USD cents per 1M tokens.

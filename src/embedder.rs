@@ -1,5 +1,13 @@
 // =============================================================================
-// src/embedder.rs — RouterFuel v0.9 (fixed: Session::run needs &mut self)
+// src/embedder.rs — RouterFuel v0.9
+//
+// FIX (this revision): embed() used to treat a poisoned mutex as a hard,
+// permanent error — `.lock().map_err(...)`. A single panic inside
+// ort::Session::run() (FFI into ONNX Runtime) would poison the mutex
+// forever, silently disabling semantic caching for the rest of the
+// process's life with no recovery path. Now recovers via
+// `poisoned.into_inner()` — the session itself is still usable after a
+// failed run, only the lock's poison flag needs clearing.
 // =============================================================================
 
 use anyhow::{anyhow, Context, Result};
@@ -7,7 +15,7 @@ use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
 use std::sync::Mutex;
 use tokenizers::Tokenizer;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 pub const EMBEDDING_DIMS: usize = 384;
 
@@ -59,10 +67,22 @@ impl LocalEmbedder {
         let token_type_ids_tensor = Tensor::from_array(([1usize, seq_len], type_ids))
             .context("failed to build token_type_ids tensor")?;
 
-        let mut session = self
-            .session
-            .lock()
-            .map_err(|_| anyhow!("embedding session mutex was poisoned by a previous panic"))?;
+        // FIX: was `.lock().map_err(|_| anyhow!("... poisoned ..."))?` —
+        // a permanent hard failure once poisoned. Recover the guard
+        // instead: the underlying Session is still valid to keep using
+        // after a single failed run; only the lock's poison flag needs
+        // clearing so future calls aren't blocked forever by one panic.
+        let mut session = match self.session.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!(
+                    "embedding session mutex was poisoned by a previous panic — \
+                     recovering and continuing rather than permanently disabling \
+                     semantic caching"
+                );
+                poisoned.into_inner()
+            }
+        };
 
         let outputs = session
             .run(ort::inputs![

@@ -3,16 +3,14 @@
 //
 // Semantic Cache using pgvector + a local ONNX embedding model.
 //
-// The "FIXED" pass on this file caused two problems:
-//   1. It dropped EMBEDDING_DIMS from the `crate::embedder` import, but the
-//      test at the bottom still references it via `super::EMBEDDING_DIMS`
-//      -> "cannot find value EMBEDDING_DIMS in module super"
-//   2. It swapped `pgvector::Vector::from(embedding)` for binding a raw
-//      `&[f32]` slice directly. sqlx::query() (the non-macro form) doesn't
-//      compile-time-check bind types, so this doesn't error at compile
-//      time — but a bare slice does not encode as Postgres's `vector`
-//      column type the way `pgvector::Vector` does, which is a runtime
-//      correctness bug, not just a lint. Reverted to Vector::from(...).
+// FIX (this revision): store()'s prompt_preview truncation used to slice
+// the prompt by raw byte index (`&prompt[..prompt.len().min(200)]`), which
+// is not UTF-8 char-boundary-safe. Any prompt containing multi-byte
+// characters (accented letters, CJK, emoji, etc.) whose 200th byte landed
+// mid-character would panic ("byte index 200 is not a char boundary")
+// inside the tokio::spawn'd store task — silently and repeatedly breaking
+// caching for that prompt shape. Now truncates on a char boundary via
+// `prompt.chars().take(200).collect()`.
 // =============================================================================
 
 use crate::embedder::{LocalEmbedder, EMBEDDING_DIMS};
@@ -163,6 +161,13 @@ if let Some((response, model, similarity, matched_hash)) = row {
 
             let vector = Vector::from(embedding);
 
+            // FIX: was `&prompt[..prompt.len().min(200)]` — a raw byte-index
+            // slice, not char-boundary-safe. Panicked on any prompt where a
+            // multi-byte UTF-8 character straddled byte 200. Truncating by
+            // `.chars()` instead guarantees a valid boundary regardless of
+            // the prompt's script/encoding.
+            let preview: String = prompt.chars().take(200).collect();
+
             if let Err(e) = sqlx::query(
                 "INSERT INTO semantic_cache
                     (prompt_hash, prompt_preview, embedding, cached_response, model_used)
@@ -170,7 +175,7 @@ if let Some((response, model, similarity, matched_hash)) = row {
                  ON CONFLICT (prompt_hash) DO NOTHING",
             )
             .bind(&hash)
-            .bind(&prompt[..prompt.len().min(200)])
+            .bind(&preview)
             .bind(&vector)
             .bind(&cached_response)
             .bind(&model_used)

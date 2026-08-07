@@ -162,10 +162,14 @@ impl ApiKeyStore {
         Self { keys }
     }
 
-    /// Validate a raw API key and return the associated client name if valid.
-    pub fn validate(&self, raw_key: &str) -> Option<&str> {
+   /// Validate a raw API key. Returns (client_hash, client_name) if valid.
+    /// `client_hash` is the canonical identifier used everywhere else in
+    /// the system — rate_limiter, spend_guard, loop_guard, and the
+    /// client_tiers table all key off SHA-256(raw_key) (see
+    /// migrations/003_client_tiers.sql). `client_name` is display-only.
+    pub fn validate(&self, raw_key: &str) -> Option<(&str, &str)> {
         let hash = sha256_hex(raw_key);
-        self.keys.get(&hash).map(String::as_str)
+        self.keys.get_key_value(&hash).map(|(h, n)| (h.as_str(), n.as_str()))
     }
 
     pub fn len(&self) -> usize {
@@ -225,19 +229,18 @@ pub async fn api_key_middleware(
 
     // Validate against the store
     match store.validate(&raw_key) {
-        Some(client_name) => {
-            debug!(client = client_name, "API key validated");
+        Some((client_hash, client_name)) => {
+            debug!(client = client_name, client_hash = &client_hash[..8], "API key validated");
 
-            // Inject client ID so handlers can use it without re-hashing
+            // FIX: inject the HASH, not the display name — this is what
+            // client_registry.rs registers tiers under, and what
+            // client_tiers.client_id in Postgres actually stores. Injecting
+            // the display name here silently orphaned every configured
+            // tier: every client fell through RateLimiter::check()'s
+            // "unregistered → auto-register at default tier" path forever.
             request.headers_mut().insert(
                 "x-routerfuel-client-id",
-                client_name.parse().unwrap_or_else(|_| {
-                    warn!(
-                        "client name '{}' contains invalid header characters, falling back to 'unknown'",
-                        client_name
-                    );
-                    "unknown".parse().unwrap()
-                }),
+                client_hash.parse().expect("sha256 hex digest is always valid header text"),
             );
 
             next.run(request).await
@@ -250,7 +253,6 @@ pub async fn api_key_middleware(
             unauthorized("Invalid API key")
         }
     }
-}
 
 // =============================================================================
 // Helpers

@@ -168,6 +168,7 @@ fn resolve_byok_route(
     selected_provider: Provider,
     requested_model: &str,
     keys: &ClientProviderKeys,
+    route_engine: &RouteEngine,
 ) -> Result<ByokRoute, ApiError> {
     if let Some(key) = keys.for_provider(selected_provider) {
         return Ok(ByokRoute {
@@ -185,9 +186,22 @@ fn resolve_byok_route(
         requested_model.to_string()
     } else if let Some(override_slug) = crate::route_engine::openrouter_slug_override(requested_model) {
         override_slug.to_string()
-    } else {
-        format!("{prefix}/{requested_model}")
-    };
+   } else {
+    let guessed = format!("{prefix}/{requested_model}");
+
+    // FIX (#5): check the guess against the real catalog
+    if !route_engine.openrouter_catalog_has(&guessed) {
+        warn!(
+            requested_model,
+            guessed_slug = %guessed,
+            "OpenRouter slug guessed via the '{{prefix}}/{{model}}' formula was not \
+             found in the OpenRouter catalog fetched at startup — sending it anyway, \
+             but the call may fail. If it does, add an entry to \
+             route_engine::openrouter_slug_override for this model."
+        );
+    }
+    guessed
+};
       
     return Ok(ByokRoute {
         provider_to_call: Provider::OpenRouter,
@@ -300,7 +314,7 @@ async fn handle_streaming(headers: HeaderMap, state: AppState, request: ChatComp
         return ApiError::SpendCapExceeded.into_response();
     }
 
-    let byok = match resolve_byok_route(selected_provider, &routing_model_id, &provider_keys) {
+   let byok = match resolve_byok_route(selected_provider, &routing_model_id, &provider_keys, &state.route_engine) {
         Ok(b) => b,
         Err(e) => {
             state.spend_guard.release(&rl_key, estimated_cost.total_cost_cents);
@@ -527,7 +541,7 @@ async fn handle_non_streaming(
         return Err(ApiError::SpendCapExceeded);
     }
 
-    let byok = resolve_byok_route(selected_provider, &routing_model_id, &provider_keys)
+  let byok = resolve_byok_route(selected_provider, &routing_model_id, &provider_keys, &state.route_engine)
         .map_err(|e| {
             state.spend_guard.release(&rl_key, estimated_cost.total_cost_cents);
             e
@@ -789,7 +803,7 @@ fn maybe_fire_shadow_request(
             }
         };
 
-        let byok_shadow = match resolve_byok_route(shadow_provider, &shadow_model_id, &provider_keys) {
+        let byok_shadow = match resolve_byok_route(shadow_provider, &shadow_model_id, &provider_keys, &route_engine) {
             Ok(b) => b,
             Err(_) => {
                 spend_guard.release(&spend_key, primary_cost_cents);

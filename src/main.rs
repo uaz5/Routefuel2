@@ -30,6 +30,7 @@ use axum::{
     Json, Router,
 };
 use serde_json::json;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
@@ -154,15 +155,6 @@ impl IntoResponse for ApiError {
 
 // ============================================================================
 // BYOK RESOLUTION
-//
-// RouterFuel never holds a paid provider key of its own. Every call must be
-// billed to the client's own account:
-//   1. Client supplied a key for the exact provider RouterFuel selected → use it.
-//   2. Client didn't, but supplied an OpenRouter key → re-route the SAME
-//      model through OpenRouter (model id becomes "<vendor>/<model>"), still
-//      billed entirely to the client.
-//   3. Neither → reject with 400 before any connector is touched. There is
-//      no fallback to a gateway-owned key anywhere in this codebase.
 // ============================================================================
 
 struct ByokRoute {
@@ -213,6 +205,30 @@ fn resolve_byok_route(
     )))
 }
 
+/// FIX (#4): builds the set of providers this client can actually reach
+/// given their supplied BYOK keys, for use as RouteEngine's `reachable`
+/// filter. `None` means "no filtering" — used when the client supplied an
+/// OpenRouter key, since that acts as a universal fallback for any
+/// provider (see resolve_byok_route), so nothing needs excluding.
+fn reachable_providers(keys: &ClientProviderKeys) -> Option<HashSet<Provider>> {
+    if keys.openrouter.is_some() {
+        return None;
+    }
+
+    let mut set = HashSet::new();
+    if keys.openai.is_some() { set.insert(Provider::OpenAI); }
+    if keys.anthropic.is_some() { set.insert(Provider::Anthropic); }
+    if keys.deepseek.is_some() { set.insert(Provider::DeepSeek); }
+    if keys.gemini.is_some() { set.insert(Provider::Gemini); }
+    if keys.mistral.is_some() { set.insert(Provider::Mistral); }
+    if keys.xai.is_some() { set.insert(Provider::XAI); }
+    if keys.qwen.is_some() { set.insert(Provider::Qwen); }
+    if keys.moonshot.is_some() { set.insert(Provider::Moonshot); }
+    if keys.zhipu.is_some() { set.insert(Provider::Zhipu); }
+    if keys.meta.is_some() { set.insert(Provider::Meta); }
+    Some(set)
+}
+
 // ============================================================================
 // CHAT COMPLETIONS — TOP-LEVEL DISPATCH (streaming vs. non-streaming)
 // ============================================================================
@@ -228,22 +244,10 @@ async fn chat_completions_handler(
     handle_non_streaming(headers, state, request).await.into_response()
 }
 
-/// The streaming twin of `handle_non_streaming` below: same guardrails and
-/// BYOK resolution, but handed off to `streaming::stream_handler` for the
-/// actual SSE proxy instead of returning a single JSON body. Semantic cache
-/// is intentionally not consulted here — caching a streamed response would
-/// mean buffering the whole thing anyway, which defeats the point of
-/// streaming; a cache hit for the same prompt still short-circuits the next
-/// *non*-streaming call.
-///
-/// NOTE: unlike handle_non_streaming, this path does not yet reserve
-/// against SpendGuard at all (no check() or try_reserve() call, and no
-/// record_spend()/reconcile() anywhere on the streaming completion path) —
-/// a client using only streaming requests currently accrues no spend
-/// against their cap regardless of concurrency. That's a separate, larger
-/// fix (needs spend_guard + rl_key threaded into streaming::stream_handler
-/// so the audit_tx receiver task can reserve/reconcile once real usage is
-/// known) and is intentionally not bundled into this revision.
+/// FIX: now reserves against SpendGuard before calling stream_handler, and
+/// passes spend_guard/rl_key/estimated_cost through so streaming.rs can
+/// reconcile (or release) it once real usage — or a failure — is known.
+/// Previously this path never recorded spend at all.
 async fn handle_streaming(headers: HeaderMap, state: AppState, request: ChatCompletionRequest) -> Response {
     let request_id = Uuid::new_v4().to_string();
     let client_id = headers
@@ -255,9 +259,6 @@ async fn handle_streaming(headers: HeaderMap, state: AppState, request: ChatComp
     if state.rate_limiter.check(&rl_key).is_err() {
         warn!(client_id = %rl_key, "Rate limit exceeded (streaming)");
         return ApiError::RateLimited.into_response();
-    }
-    if !state.spend_guard.check(&rl_key) {
-        return ApiError::SpendCapExceeded.into_response();
     }
 
     let prompt_text = request
@@ -272,15 +273,39 @@ async fn handle_streaming(headers: HeaderMap, state: AppState, request: ChatComp
         return ApiError::LoopDetected.into_response();
     }
 
-    let (selected_provider, routing_model_id) = match resolve_model(&state, &request, 0) {
+    // FIX (#4): compute provider_keys BEFORE routing so resolve_model can
+    // filter to what this client can actually reach.
+    let provider_keys = ClientProviderKeys::from_headers(&headers);
+
+    let input_tokens = tokens::count_request_tokens(&request.messages, &request.model)
+        .unwrap_or(0);
+
+    let (selected_provider, routing_model_id) = match resolve_model(&state, &request, input_tokens, &provider_keys) {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
 
-    let provider_keys = ClientProviderKeys::from_headers(&headers);
+    // FIX: pricing + reservation, same pattern as handle_non_streaming.
+    let (cost_per_1m_input, cost_per_1m_output) = match state.route_engine.get_pricing(&routing_model_id) {
+        Ok(p) => p,
+        Err(e) => {
+            error!("Pricing lookup failed: {}", e);
+            return ApiError::InternalError("Pricing lookup failed".to_string()).into_response();
+        }
+    };
+    let estimated_output = tokens::estimate_output_tokens(request.max_tokens, &request.model);
+    let estimated_cost = TokenCostBreakdown::new(input_tokens, estimated_output, cost_per_1m_input, cost_per_1m_output);
+
+    if !state.spend_guard.try_reserve(&rl_key, estimated_cost.total_cost_cents) {
+        return ApiError::SpendCapExceeded.into_response();
+    }
+
     let byok = match resolve_byok_route(selected_provider, &routing_model_id, &provider_keys) {
         Ok(b) => b,
-        Err(e) => return e.into_response(),
+        Err(e) => {
+            state.spend_guard.release(&rl_key, estimated_cost.total_cost_cents);
+            return e.into_response();
+        }
     };
 
     let mut effective_request = request.clone();
@@ -300,38 +325,41 @@ async fn handle_streaming(headers: HeaderMap, state: AppState, request: ChatComp
         byok.api_key.clone(),
         effective_request,
         client_id,
-        true, // is_byok — RouterFuel is BYOK-only, see resolve_byok_route
+        true, // is_byok
         Arc::clone(&state.route_engine),
         Arc::clone(&state.cost_tracker),
         reqwest::Client::new(),
         Arc::clone(&state.concurrency_limiter),
+        Arc::clone(&state.spend_guard),
+        rl_key,
+        estimated_cost.total_cost_cents,
     )
     .await
     .into_response()
 }
 
-/// Resolves what to route to, supporting three forms in the `model` field:
-///   - a concrete model id, e.g. "claude-opus-4-8"          → routed as-is
-///   - "auto"                                                → best model by
-///     balanced cost/latency/quality score, given the real input token count
-///   - "task:<name>", e.g. "task:summarise"                  → the model
-///     RouterFuel has pre-selected as best-fit for that task (see
-///     route_engine::MeetingTask and RouteEngine::select_for_task)
+/// Resolves what to route to. FIX (#4): now takes `keys` and filters
+/// candidates in "auto"/"task:" routing to providers this client can
+/// actually reach, instead of scoring the entire registry (including the
+/// ~300+ OpenRouter-catalog entries merged at startup) with no awareness
+/// of which BYOK keys were supplied.
 fn resolve_model(
     state: &AppState,
     request: &ChatCompletionRequest,
     input_tokens: u32,
+    keys: &ClientProviderKeys,
 ) -> Result<(Provider, String), ApiError> {
     let has_image = request.messages.iter().any(|m| m.content.has_image());
+    let reachable = reachable_providers(keys);
 
     if request.model == "auto" {
         let decision = if has_image {
-            crate::vision::select_vision_model(&state.route_engine, input_tokens, RoutingPriority::Balanced)
+            crate::vision::select_vision_model(&state.route_engine, input_tokens, RoutingPriority::Balanced, reachable.as_ref())
                 .map_err(|e| ApiError::ProviderError(format!("No vision-capable provider available: {e}")))?
         } else {
             state
                 .route_engine
-                .select(input_tokens, request.max_tokens.unwrap_or(1024), RoutingPriority::Balanced)
+                .select_reachable(input_tokens, request.max_tokens.unwrap_or(1024), RoutingPriority::Balanced, reachable.as_ref())
                 .map_err(|e| ApiError::ProviderError(format!("No available providers: {e}")))?
         };
         return Ok((decision.model.provider, decision.model.api_id));
@@ -343,18 +371,21 @@ fn resolve_model(
             .map_err(|e: anyhow::Error| ApiError::BadRequest(e.to_string()))?;
         let decision = state
             .route_engine
-            .select_for_task(task, input_tokens)
+            .select_for_task(task, input_tokens, reachable.as_ref())
             .map_err(|e| ApiError::ProviderError(format!("Task routing failed: {e}")))?;
 
         if has_image && !decision.model.supports_vision {
             let fallback =
-                crate::vision::select_vision_model(&state.route_engine, input_tokens, RoutingPriority::Balanced)
+                crate::vision::select_vision_model(&state.route_engine, input_tokens, RoutingPriority::Balanced, reachable.as_ref())
                     .map_err(|e| ApiError::ProviderError(format!("No vision-capable provider available: {e}")))?;
             return Ok((fallback.model.provider, fallback.model.api_id));
         }
         return Ok((decision.model.provider, decision.model.api_id));
     }
 
+    // A concrete model id was requested directly — no reachability
+    // filtering needed here; resolve_byok_route will give a clear 400 if
+    // the client genuinely has no way to call it.
     let provider = state
         .route_engine
         .select_provider(&request.model)
@@ -413,12 +444,6 @@ async fn handle_non_streaming(
         return Err(ApiError::RateLimited);
     }
 
-    // FIX: the plain spend_guard.check() that used to sit here has moved
-    // down past routing + pricing lookup, where it's replaced by
-    // try_reserve() — see below. Loop guard and semantic cache lookup stay
-    // in their original position (before routing), since neither depends
-    // on knowing the resolved model's price.
-
     let prompt_text = request
         .messages
         .iter()
@@ -461,10 +486,12 @@ async fn handle_non_streaming(
         "Counted request tokens"
     );
 
+    // FIX (#4): compute provider_keys before routing so resolve_model can
+    // filter "auto"/"task:" candidates to what this client can reach.
+    let provider_keys = ClientProviderKeys::from_headers(&headers);
+
     let routing_start = Instant::now();
-
-    let (selected_provider, routing_model_id) = resolve_model(&state, &request, input_tokens)?;
-
+    let (selected_provider, routing_model_id) = resolve_model(&state, &request, input_tokens, &provider_keys)?;
     let routing_decision_ms = routing_start.elapsed().as_millis() as u64;
 
     debug!(
@@ -481,12 +508,6 @@ async fn handle_non_streaming(
         );
     }
 
-    // FIX: pricing lookup moved up to here (it used to happen much later,
-    // right before cost_saved was calculated) so we have a real cost
-    // estimate to reserve against SpendGuard, instead of a bare boolean
-    // check with nothing actually held. cost_per_1m_input/output are reused
-    // further down when computing the real token_cost from the actual
-    // response — no second lookup.
     let (cost_per_1m_input, cost_per_1m_output) = state
         .route_engine
         .get_pricing(&routing_model_id)
@@ -502,19 +523,12 @@ async fn handle_non_streaming(
         cost_per_1m_output,
     );
 
-    // FIX: was `if !state.spend_guard.check(&rl_key) { return Err(...) }`
-    // — a plain read with nothing reserved, so concurrent requests from the
-    // same client could all pass before any of them recorded real spend.
-    // try_reserve() checks and reserves the estimate atomically.
     if !state.spend_guard.try_reserve(&rl_key, estimated_cost.total_cost_cents) {
         return Err(ApiError::SpendCapExceeded);
     }
 
-    let provider_keys = ClientProviderKeys::from_headers(&headers);
     let byok = resolve_byok_route(selected_provider, &routing_model_id, &provider_keys)
         .map_err(|e| {
-            // FIX: release the reservation — no provider was ever called,
-            // so nothing was actually billed.
             state.spend_guard.release(&rl_key, estimated_cost.total_cost_cents);
             e
         })?;
@@ -540,8 +554,6 @@ async fn handle_non_streaming(
         .map_err(|e| {
             error!("Connector error: {}", e);
 
-            // FIX: release the reservation — the call failed, nothing was
-            // billed to the client's provider account.
             state.spend_guard.release(&rl_key, estimated_cost.total_cost_cents);
 
             state.cost_tracker.record_error(
@@ -573,10 +585,17 @@ async fn handle_non_streaming(
 
     if !prompt_text.is_empty() {
         if let Ok(response_json) = serde_json::to_string(&response) {
+            // FIX (#9): key the cache by the ORIGINAL requested model
+            // string, not the provider's echoed response.model. This is
+            // what lookup() above already uses (&request.model) — storing
+            // under response.model meant "auto", "task:x", and
+            // OpenRouter-fallback-rewritten requests could never hit the
+            // cache on a repeat, since the resolved/echoed model rarely
+            // matches what the client literally asked for.
             state.semantic_cache.store(
                 prompt_text,
                 response_json,
-                response.model.clone(),
+                request.model.clone(),
             );
         }
     }
@@ -596,14 +615,11 @@ async fn handle_non_streaming(
         );
     }
 
-    // NOTE: pricing lookup that used to happen here is gone — cost_per_1m_input
-    // / cost_per_1m_output were already fetched above, before the SpendGuard
-    // reservation, and are reused here to build the real token_cost.
     let token_cost =
         TokenCostBreakdown::new(input_tokens, output_tokens, cost_per_1m_input, cost_per_1m_output);
 
     let baseline_cost =
-        TokenCostBreakdown::new(input_tokens, output_tokens, 500.0, 3000.0); // vs. a flagship model, e.g. GPT-5.5 / Claude Opus tier
+        TokenCostBreakdown::new(input_tokens, output_tokens, 500.0, 3000.0);
 
     let cost_saved = baseline_cost.total_cost_cents - token_cost.total_cost_cents;
     let savings_pct = if baseline_cost.total_cost_cents > 0.0 {
@@ -621,10 +637,6 @@ async fn handle_non_streaming(
         "Calculated costs (billed to client's own BYOK key, not RouterFuel)"
     );
 
-    // FIX: was `state.spend_guard.record_spend(&rl_key, token_cost.total_cost_cents)`
-    // — added the real cost on top of the estimate that was never reserved
-    // in the old code, double counting relative to nothing. Now reconciles
-    // the reservation made above (estimated_cost) to the real token_cost.
     state.spend_guard.reconcile(&rl_key, estimated_cost.total_cost_cents, token_cost.total_cost_cents);
 
     {
@@ -684,7 +696,7 @@ async fn handle_non_streaming(
         client_id,
         None,
         None,
-        true, // is_byok — RouterFuel is BYOK-only; every completed call was billed to a client key
+        true,
     );
 
     let total_latency = start.elapsed().as_millis() as u64;
@@ -733,13 +745,6 @@ fn maybe_fire_shadow_request(
     let spend_key = client_id.clone().unwrap_or_else(|| "anonymous".to_string());
 
     tokio::spawn(async move {
-        // FIX: previously this task never called spend_guard at all until
-        // AFTER the shadow call completed (record_spend only) — meaning a
-        // client already at or over their spend cap could keep triggering
-        // fully-billed shadow calls indefinitely via `shadow_model`, since
-        // only the primary request path ever checked the cap. Reserve
-        // against the cap (using the primary call's cost as a same-order-
-        // of-magnitude estimate) before the shadow call is fired at all.
         if !spend_guard.try_reserve(&spend_key, primary_cost_cents) {
             debug!(shadow_model = %shadow_model_id, "Shadow mode: client over spend cap, skipping shadow call");
             cost_tracker.record_shadow_comparison(ShadowComparison {
@@ -763,7 +768,6 @@ fn maybe_fire_shadow_request(
         let shadow_provider = match route_engine.select_provider(&shadow_model_id) {
             Ok(p) => p,
             Err(e) => {
-                // FIX: release the reservation — no shadow call happened.
                 spend_guard.release(&spend_key, primary_cost_cents);
                 debug!(shadow_model = %shadow_model_id, "Shadow mode: unknown model ({e}), skipping");
                 cost_tracker.record_shadow_comparison(ShadowComparison {
@@ -788,7 +792,6 @@ fn maybe_fire_shadow_request(
         let byok_shadow = match resolve_byok_route(shadow_provider, &shadow_model_id, &provider_keys) {
             Ok(b) => b,
             Err(_) => {
-                // FIX: release the reservation — no shadow call happened.
                 spend_guard.release(&spend_key, primary_cost_cents);
                 debug!(shadow_model = %shadow_model_id, "Shadow mode: no BYOK key for shadow provider, skipping");
                 cost_tracker.record_shadow_comparison(ShadowComparison {
@@ -840,8 +843,6 @@ fn maybe_fire_shadow_request(
                     .map(|c| c.message.content.as_text().len())
                     .unwrap_or(0);
 
-                // FIX: was `spend_guard.record_spend(&spend_key, shadow_cost.total_cost_cents)`
-                // — reconcile the reservation made above to the real cost instead.
                 spend_guard.reconcile(&spend_key, primary_cost_cents, shadow_cost.total_cost_cents);
 
                 debug!(
@@ -868,7 +869,6 @@ fn maybe_fire_shadow_request(
                 });
             }
             Err(e) => {
-                // FIX: release the reservation — the call failed, nothing was billed.
                 spend_guard.release(&spend_key, primary_cost_cents);
                 cost_tracker.record_shadow_comparison(ShadowComparison {
                     request_id,
@@ -892,13 +892,6 @@ fn maybe_fire_shadow_request(
 
 // ============================================================================
 // HEALTH CHECK
-//
-// NOTE: `/audit/daily` used to be handled here (`audit_daily_handler`) and
-// was mounted in `public_routes` with no authentication at all, despite
-// returning aggregate cross-client cost data. It has been MOVED to
-// src/admin.rs (`admin::audit_daily_handler`) and is now registered under
-// `admin_routes`, behind the same `X-Admin-Key` requirement as every other
-// spend-reporting endpoint. See admin.rs for the handler itself.
 // ============================================================================
 async fn dashboard_handler() -> Html<&'static str> {
     Html(include_str!("../static/dashboard.html"))
@@ -1102,22 +1095,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
 .layer(middleware::from_fn(cursor_bridge_middleware));
     
-    // FIX: `/audit/daily` removed from here. It used to be public (same
-    // tier as /health and /v1/models) despite returning aggregate spend
-    // data across all clients. It's now registered under `admin_routes`
-    // below, served by `admin::audit_daily_handler`, and requires
-    // X-Admin-Key like every other cost/spend endpoint.
     let public_routes = Router::new()
     .route("/health", get(health_handler))
     .route("/v1/models", get(models_handler))
     .route("/admin/dashboard", get(dashboard_handler)) 
     .with_state(state);
 
-    // Admin dashboard — see src/admin.rs. Guarded by ROUTERFUEL_ADMIN_KEY
-    // (X-Admin-Key header), a separate secret from per-client BYOK/auth
-    // keys, since a client key must never be able to see other clients'
-    // spend. If ROUTERFUEL_ADMIN_KEY isn't set, admin_key_middleware refuses
-    // every request with 503 rather than silently leaving the dashboard open.
     let admin_key = Arc::new(std::env::var("ROUTERFUEL_ADMIN_KEY").unwrap_or_default());
     if admin_key.is_empty() {
         warn!("ROUTERFUEL_ADMIN_KEY is not set — the admin dashboard API is disabled until it is");
@@ -1140,14 +1123,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/admin/timeline", get(admin::timeline_handler))
         .route("/admin/rate-limits", get(admin::rate_limits_handler))
         .route("/admin/shadow", get(admin::shadow_stats_handler))
-        .route("/audit/daily", get(admin::audit_daily_handler)) // moved from public_routes — see FIX note above
+        .route("/audit/daily", get(admin::audit_daily_handler))
         .with_state(admin_state)
         .layer(middleware::from_fn_with_state(admin_key, admin::admin_key_middleware));
 
-    // Every sub-router above already resolved its own state via
-    // `.with_state()`, so they're all `Router<()>` here and can be merged
-    // freely even though they started out with three different state types
-    // (AppState for two of them, AdminState for the third).
     let app = Router::new()
         .merge(protected_routes)
         .merge(public_routes)

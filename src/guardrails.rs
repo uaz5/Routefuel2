@@ -22,6 +22,22 @@
 // reset if the process restarts and aren't shared across horizontally-scaled
 // replicas — fine for a loop/spend *guard*, not a substitute for the
 // authoritative accounting in cost_tracker.rs / request_logs.
+//
+// FIX (this revision): SpendGuard previously exposed only check() (a plain
+// read) + record_spend() (called after the real cost was known). That's a
+// check-then-act race — under concurrent requests from the same client,
+// many could all pass check() before any of them called record_spend(),
+// letting total spend blow well past the cap. It also meant shadow-mode
+// calls (main.rs::maybe_fire_shadow_request) never called check() at all,
+// only record_spend() after the fact, so a client already over cap could
+// keep triggering fully-billed shadow calls indefinitely.
+//
+// try_reserve()/reconcile()/release() replace that pattern with an atomic
+// reserve-then-adjust: the estimated cost is reserved against the cap in
+// the same operation that checks it, then reconciled (or released) once
+// the real cost — or the fact that no call happened at all — is known.
+// check()/record_spend() are left in place for compatibility but should be
+// treated as deprecated; new call sites should use the reserve pattern.
 // =============================================================================
 
 use dashmap::DashMap;
@@ -132,6 +148,11 @@ impl SpendGuard {
     /// Returns `true` if this client is still under their cap and the
     /// request may proceed. Does NOT record anything — call `record_spend`
     /// after a call actually completes and its real cost is known.
+    ///
+    /// DEPRECATED: this is a plain check with no reservation, so concurrent
+    /// callers can all pass it before any of them records real spend. Use
+    /// `try_reserve` for new call sites — it checks and reserves in one
+    /// atomic step.
     pub fn check(&self, client_id: &str) -> bool {
         match self.spent.get(client_id) {
             None => true,
@@ -148,6 +169,9 @@ impl SpendGuard {
 
     /// Adds `cost_cents` to this client's running total, resetting the
     /// window if it has expired.
+    ///
+    /// DEPRECATED: paired with `check()`. Use `try_reserve`/`reconcile`/
+    /// `release` for new call sites.
     pub fn record_spend(&self, client_id: &str, cost_cents: f64) {
         let now = Instant::now();
         let mut entry = self.spent.entry(client_id.to_string()).or_insert((0.0, now));
@@ -166,6 +190,50 @@ impl SpendGuard {
                 "SpendGuard: client has hit its spend cap for this window"
             );
         }
+    }
+
+    /// Atomically checks AND reserves `estimated_cost_cents` against the
+    /// client's cap in one operation — closes the race where many
+    /// concurrent requests all pass a plain check() before any of them
+    /// finishes and records its real cost. Returns false (reserving
+    /// nothing) if the reservation would exceed the cap.
+    pub fn try_reserve(&self, client_id: &str, estimated_cost_cents: f64) -> bool {
+        let now = Instant::now();
+        let mut entry = self.spent.entry(client_id.to_string()).or_insert((0.0, now));
+
+        if now.duration_since(entry.1) > self.window {
+            entry.0 = 0.0;
+            entry.1 = now;
+        }
+
+        if entry.0 + estimated_cost_cents > self.max_cents_per_window {
+            warn!(
+                client_id,
+                spent_cents = entry.0,
+                attempted_cents = estimated_cost_cents,
+                cap_cents = self.max_cents_per_window,
+                "SpendGuard: reservation would exceed cap — rejecting before any provider call"
+            );
+            return false;
+        }
+
+        entry.0 += estimated_cost_cents;
+        true
+    }
+
+    /// Adjusts a prior reservation to the real cost once known (a call is
+    /// commonly a bit more or less than the pre-call estimate).
+    pub fn reconcile(&self, client_id: &str, estimated_cost_cents: f64, actual_cost_cents: f64) {
+        let delta = actual_cost_cents - estimated_cost_cents;
+        if delta == 0.0 { return; }
+        let mut entry = self.spent.entry(client_id.to_string()).or_insert((0.0, Instant::now()));
+        entry.0 = (entry.0 + delta).max(0.0);
+    }
+
+    /// Releases a reservation entirely — for when the call never happened
+    /// (rejected/errored before any provider was billed).
+    pub fn release(&self, client_id: &str, estimated_cost_cents: f64) {
+        self.reconcile(client_id, estimated_cost_cents, 0.0);
     }
 }
 
@@ -209,5 +277,40 @@ mod tests {
         assert!(g.check("client-e"));
         g.record_spend("client-e", 50.0); // total 110 >= 100
         assert!(!g.check("client-e"));
+    }
+
+    #[test]
+    fn try_reserve_blocks_once_cap_would_be_exceeded() {
+        let g = SpendGuard::with_config(100.0, Duration::from_secs(3600));
+        assert!(g.try_reserve("client-f", 60.0));
+        assert!(g.try_reserve("client-f", 30.0)); // running total 90, still under 100
+        assert!(!g.try_reserve("client-f", 20.0)); // would push to 110 — rejected, nothing added
+    }
+
+    #[test]
+    fn concurrent_reservations_cannot_both_pass_a_stale_check() {
+        // Simulates the race check()/record_spend() was vulnerable to:
+        // two reservations that individually fit under the cap, but not
+        // both at once, should not both succeed.
+        let g = SpendGuard::with_config(100.0, Duration::from_secs(3600));
+        assert!(g.try_reserve("client-g", 70.0));
+        assert!(!g.try_reserve("client-g", 70.0)); // second reservation correctly rejected
+    }
+
+    #[test]
+    fn release_frees_a_reservation() {
+        let g = SpendGuard::with_config(100.0, Duration::from_secs(3600));
+        assert!(g.try_reserve("client-h", 90.0));
+        assert!(!g.try_reserve("client-h", 20.0)); // would exceed cap
+        g.release("client-h", 90.0); // e.g. the call failed, nothing was billed
+        assert!(g.try_reserve("client-h", 20.0)); // now fits
+    }
+
+    #[test]
+    fn reconcile_adjusts_reservation_to_real_cost() {
+        let g = SpendGuard::with_config(100.0, Duration::from_secs(3600));
+        assert!(g.try_reserve("client-i", 50.0)); // estimate
+        g.reconcile("client-i", 50.0, 30.0); // actual cost was lower
+        assert!(g.try_reserve("client-i", 65.0)); // 30 + 65 = 95, fits under 100
     }
 }

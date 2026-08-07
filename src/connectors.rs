@@ -15,6 +15,21 @@
 //   {model, messages, ...} / {choices:[{message}], usage} JSON shape with
 //   `Authorization: Bearer <key>` auth — that's GenericOpenAICompatibleConnector.
 //   Anthropic and Gemini use different wire formats and get bespoke connectors.
+//
+// FIX (this revision), two related issues:
+//   1. ChatCompletionResponse/Choice previously required object/created/
+//      finish_reason with no #[serde(default)] — any provider deviating
+//      even slightly from strict OpenAI wire compatibility on a field
+//      RouterFuel doesn't actually need would fail deserialization
+//      entirely. Those fields are now #[serde(default)].
+//   2. A deserialize failure (malformed/unexpected JSON shape) used to call
+//      cb.record_failure(provider) — treating a RouterFuel-side parsing
+//      assumption mismatch the same as a real provider outage, tripping
+//      the circuit breaker against a provider that might be perfectly
+//      healthy. record_failure is no longer called on parse failures;
+//      ConnectorError::trips_circuit() already correctly excludes
+//      BadResponse from the set of errors that should trip the breaker —
+//      this just stops bypassing that distinction.
 // ============================================================================
 
 use crate::circuit_breaker::CircuitBreaker;
@@ -151,16 +166,20 @@ pub struct ChatMessage {
     pub role: String,
     /// Plain text (the common case, backward-compatible with any existing
     /// client sending a bare string) or multimodal parts carrying one or
-    /// more images alongside text — see src/vision.rs. Previously this was
-    /// a bare `String`, which meant vision.rs's types existed but no
-    /// request could actually carry an image through the API.
+    /// more images alongside text — see src/vision.rs.
     pub content: crate::vision::MessageContent,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatCompletionResponse {
+    // FIX: #[serde(default)] on fields RouterFuel doesn't strictly need,
+    // so a provider that's technically "OpenAI-compatible" but omits one
+    // of these doesn't fail deserialization entirely.
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub object: String,
+    #[serde(default)]
     pub created: u64,
     pub model: String,
     pub choices: Vec<Choice>,
@@ -169,8 +188,10 @@ pub struct ChatCompletionResponse {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Choice {
+    #[serde(default)]
     pub index: u32,
     pub message: ChatMessage,
+    #[serde(default)]
     pub finish_reason: String,
 }
 
@@ -302,19 +323,11 @@ struct AnthropicReq {
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     /// Anthropic takes system content as a top-level field, not a message
-    /// with role "system" — previously this codebase passed system-role
-    /// messages straight into `messages`, which Anthropic's API rejects.
+    /// with role "system".
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<String>,
 }
 
-/// Anthropic's `/v1/messages` doesn't have a separate "system" message role
-/// — system content is pulled out into its own top-level field. When any
-/// message carries an image, the per-message content must be built via
-/// `vision::to_anthropic_content` (image blocks have a different shape than
-/// OpenAI's `image_url` blocks); plain-text-only messages serialize
-/// identically either way, so this always routes through the same helper
-/// rather than branching on whether an image is present.
 pub fn build_anthropic_messages(messages: &[ChatMessage]) -> (Vec<serde_json::Value>, Option<String>) {
     let mut system_text = String::new();
     let mut out = Vec::with_capacity(messages.len());
@@ -421,8 +434,10 @@ impl Connector for AnthropicConnector {
 
         match status {
            200..=299 => {
+                // FIX: no longer calls record_failure on a parse error — a
+                // schema mismatch is a RouterFuel-side assumption bug, not
+                // evidence the provider itself is unhealthy.
                 let ar: AnthropicResp = serde_json::from_str(&text).map_err(|e| {
-                    self.circuit_breaker.record_failure(Provider::Anthropic);
                     ConnectorError::BadResponse(format!("Provider returned unexpected response format: {e}"))
                 })?;
                 let content = ar
@@ -480,7 +495,6 @@ impl Connector for AnthropicConnector {
 
 // ============================================================================
 // GEMINI CONNECTOR (bespoke wire format)
-// POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={API_KEY}
 // ============================================================================
 
 #[derive(Debug, Deserialize)]
@@ -515,9 +529,6 @@ struct GeminiResp {
     usage_metadata: Option<GeminiUsageMetadata>,
 }
 
-/// Translate a RouterFuel `ChatCompletionRequest` into Gemini's wire format.
-/// Shared by `GeminiConnector::complete` (non-streaming) and
-/// `streaming::stream_handler` (SSE) so the translation lives in one place.
 pub fn to_gemini_body(req: &ChatCompletionRequest) -> serde_json::Value {
     let mut system_text = String::new();
     let mut contents: Vec<serde_json::Value> = Vec::new();
@@ -530,10 +541,6 @@ pub fn to_gemini_body(req: &ChatCompletionRequest) -> serde_json::Value {
             system_text.push_str(&m.content.as_text());
             continue;
         }
-        // Routes through vision::to_gemini_content for every message (not
-        // just image-carrying ones) so text-only and multimodal messages go
-        // through one code path — it already emits {"text": ...} parts for
-        // plain text.
         let mm = crate::vision::MultimodalMessage { role: m.role.clone(), content: m.content.clone() };
         contents.push(crate::vision::to_gemini_content(&mm));
     }
@@ -622,8 +629,8 @@ impl Connector for GeminiConnector {
 
         match status {
             200..=299 => {
+                // FIX: no longer calls record_failure on a parse error.
                 let gr: GeminiResp = serde_json::from_str(&text).map_err(|e| {
-                    self.circuit_breaker.record_failure(Provider::Gemini);
                     ConnectorError::BadResponse(format!("Provider returned unexpected response format: {e}"))
                 })?;
                 let content = gr
@@ -691,9 +698,6 @@ impl Connector for GeminiConnector {
 
 // ============================================================================
 // CONNECTOR MANAGER
-// Holds no API keys — every connector receives the client's BYOK key at
-// call time. If OpenRouter is used as a fallback route, the caller (main.rs)
-// rewrites the model id to "<openrouter_prefix>/<model_id>" before calling.
 // ============================================================================
 
 pub struct ConnectorManager {
@@ -795,8 +799,6 @@ impl ConnectorManager {
 
 fn build_client() -> reqwest::Client {
     reqwest::Client::builder()
-        // Connection pooling  keep-alive cuts TLS handshake latency on every
-        // repeat call to the same provider — meaningful at gateway volume.
         .pool_max_idle_per_host(64)
         .pool_idle_timeout(std::time::Duration::from_secs(90))
         .tcp_keepalive(std::time::Duration::from_secs(60))
@@ -813,15 +815,6 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
-/// Builds the request body for every OpenAI-compatible provider (OpenAI,
-/// DeepSeek, Mistral, xAI, Qwen, Moonshot, Zhipu, Meta, OpenRouter). Routes
-/// each message through `vision::to_openai_compatible_content` rather than
-/// relying on `ChatCompletionRequest`'s own derived `Serialize` — that
-/// derive produces the correct shape for plain text and URL images, but for
-/// inline base64 images it would emit vision.rs's internal
-/// `{"image_data": {...}}` field instead of the `{"image_url": {"url":
-/// "data:...;base64,..."}}` data-URI shape every OpenAI-compatible provider
-/// actually expects.
 pub fn build_openai_compatible_body(req: &ChatCompletionRequest) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = req
         .messages
@@ -897,8 +890,13 @@ async fn openai_compatible_call(
 
     match status {
         200..=299 => {
+            // FIX: no longer calls cb.record_failure(provider) here — a
+            // deserialize failure means RouterFuel's schema assumption for
+            // this "OpenAI-compatible" provider was wrong, not that the
+            // provider is unhealthy. ConnectorError::trips_circuit()
+            // already excludes BadResponse from the failure set this
+            // matters for.
             let resp: ChatCompletionResponse = serde_json::from_str(&text).map_err(|e| {
-                cb.record_failure(provider);
                 ConnectorError::BadResponse(format!(
                     "Provider returned unexpected response format: {e}"
                 ))

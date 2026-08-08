@@ -471,7 +471,7 @@ async fn handle_non_streaming(
     }
 
     if !prompt_text.is_empty() {
-       if let Some(hit) = state.semantic_cache.lookup(&prompt_text, &request.model).await {
+       if let Some(hit) = state.semantic_cache.lookup(&rl_key, &prompt_text, &request.model).await {
             info!(
                 request_id = %request_id,
                 similarity = hit.similarity,
@@ -607,6 +607,7 @@ async fn handle_non_streaming(
             // cache on a repeat, since the resolved/echoed model rarely
             // matches what the client literally asked for.
             state.semantic_cache.store(
+                rl_key.clone(),
                 prompt_text,
                 response_json,
                 request.model.clone(),

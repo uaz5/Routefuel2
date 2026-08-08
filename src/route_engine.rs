@@ -11,11 +11,29 @@
 // never pays a provider bill itself, so a stale price here only skews which
 // model gets picked, not what anyone is actually charged (providers bill the
 // client's own key directly).
+//
+// FIX (this revision): the `impl RouteEngine` block used to close early
+// (right after `openrouter_catalog_has`), which left build_registry(),
+// select(), select_for_task(), extend_registry(), find(),
+// select_provider(), get_pricing(), list_enabled(), list_vision_capable(),
+// is_vision_capable(), and set_enabled() as free-standing module functions
+// with an illegal bare `&self` param — this did not compile. All of those
+// are now back inside one single `impl RouteEngine` block.
+//
+// FIX (this revision): added `select_reachable()`, which main.rs's
+// resolve_model() and vision.rs's select_vision_model() already called but
+// which never existed in this file — the BYOK-reachability filter (only
+// route "auto"/"task:" requests to providers the client actually supplied a
+// key for) was documented via comments in main.rs but not implemented.
+// `select_for_task` also gained the same `reachable` parameter so task
+// routing respects it too, both on its "preferred model" fast path and its
+// scored fallback.
 // ============================================================================
 
 use crate::connectors::Provider;
 use anyhow::{anyhow, Result};
 use parking_lot::RwLock;
+use std::collections::HashSet;
 use tracing::{debug, info, instrument};
 
 #[derive(Debug, Clone)]
@@ -120,27 +138,24 @@ impl RouteEngine {
         Self {
             models: RwLock::new(Self::build_registry()),
         }
-    } 
+    }
 
-    /// FIX (#5): returns true if `candidate` exists as a literal id in the
-    /// registry under Provider::OpenRouter — i.e. it's a real slug
-    /// OpenRouter's own catalog reported at startup (see
-    /// openrouter_catalog.rs's extend_registry call in main.rs), not just
-    /// an assumed "{prefix}/{model}" formula. resolve_byok_route in
-    /// main.rs uses this to verify a guessed OpenRouter slug before
-    /// sending it, instead of trusting the formula blindly — this is the
-    /// same class of bug that broke gemini-3-flash (OpenRouter's real
-    /// slug needed a "-preview" suffix the formula didn't produce), just
-    /// generalized into a check instead of a single hand-added exception.
+    /// Returns true if `candidate` exists as a literal id in the registry
+    /// under Provider::OpenRouter — i.e. it's a real slug OpenRouter's own
+    /// catalog reported at startup (see openrouter_catalog.rs's
+    /// extend_registry call in main.rs), not just an assumed
+    /// "{prefix}/{model}" formula. resolve_byok_route in main.rs uses this
+    /// to verify a guessed OpenRouter slug before sending it, instead of
+    /// trusting the formula blindly — this is the same class of bug that
+    /// broke gemini-3-flash (OpenRouter's real slug needed a "-preview"
+    /// suffix the formula didn't produce), just generalized into a check
+    /// instead of a single hand-added exception.
     pub fn openrouter_catalog_has(&self, candidate: &str) -> bool {
         self.models
             .read()
             .iter()
             .any(|m| m.provider == Provider::OpenRouter && m.api_id == candidate)
     }
-
-    // The rest of your methods (build_registry, select, select_for_task, etc.) continue here...
-}
 
     /// Master registry — every model RouterFuel knows how to route to,
     /// as of July 2026. Cost figures are USD cents per 1M tokens.
@@ -154,8 +169,6 @@ impl RouteEngine {
                 cost_in: 500.0, cost_out: 2500.0, latency_ms: 140, quality: 0.98, context: 1_000_000,
                 vision: true, open_weight: false, enabled: true),
 
-            // Legacy — same price as Opus 5 but slower and lower quality on
-            // benchmarks; kept enabled for callers pinned to the old id.
             model!(api_id: "claude-opus-4-8", display_name: "Claude Opus 4.8", provider: Provider::Anthropic,
                 cost_in: 500.0, cost_out: 2500.0, latency_ms: 260, quality: 0.93, context: 1_000_000,
                 vision: true, open_weight: false, enabled: true),
@@ -172,7 +185,6 @@ impl RouteEngine {
                 cost_in: 1000.0, cost_out: 5000.0, latency_ms: 320, quality: 0.99, context: 1_000_000,
                 vision: true, open_weight: false, enabled: true),
 
-            // Legacy Anthropic — kept enabled for callers pinned to old ids
             model!(api_id: "claude-opus-4-7", display_name: "Claude Opus 4.7", provider: Provider::Anthropic,
                 cost_in: 500.0, cost_out: 2500.0, latency_ms: 270, quality: 0.97, context: 1_000_000,
                 vision: true, open_weight: false, enabled: true),
@@ -370,9 +382,6 @@ impl RouteEngine {
             // Catch-all: reachable when a client only supplies an
             // OpenRouter key. Model ids use OpenRouter's "vendor/model" slug
             // directly, so these entries are picked verbatim (no rewrite).
-            // Kept as a small curated set — full catalogue is 300+ models
-            // and isn't worth hardcoding; unknown ids still route fine via
-            // the BYOK-OpenRouter fallback path in main.rs.
             // ================================================================
             model!(api_id: "openrouter/auto", display_name: "OpenRouter Auto (best-available)", provider: Provider::OpenRouter,
                 cost_in: 100.0, cost_out: 300.0, latency_ms: 200, quality: 0.85, context: 128_000,
@@ -391,6 +400,21 @@ impl RouteEngine {
         max_output_tokens: u32,
         priority: RoutingPriority,
     ) -> Result<RoutingDecision> {
+        self.select_reachable(input_tokens, max_output_tokens, priority, None)
+    }
+
+    /// Same scoring as `select`, but restricted to providers in `reachable`
+    /// when it's `Some(set)`. `None` means "no filtering" (used when the
+    /// client supplied an OpenRouter key, which is a universal fallback —
+    /// see main.rs::reachable_providers).
+    #[instrument(skip(self, reachable))]
+    pub fn select_reachable(
+        &self,
+        input_tokens: u32,
+        max_output_tokens: u32,
+        priority: RoutingPriority,
+        reachable: Option<&HashSet<Provider>>,
+    ) -> Result<RoutingDecision> {
         let models = self.models.read();
 
         // Weight tuples: (cost, latency, quality, context_headroom)
@@ -404,6 +428,12 @@ impl RouteEngine {
         let mut best: Option<(ModelConfig, f64)> = None;
 
         for m in models.iter().filter(|m| m.enabled) {
+            if let Some(r) = reachable {
+                if !r.contains(&m.provider) {
+                    continue;
+                }
+            }
+
             if input_tokens >= m.context_window {
                 debug!(model = %m.api_id, "Skipped — context overflow");
                 continue;
@@ -427,7 +457,7 @@ impl RouteEngine {
         }
 
         let (model, score) = best.ok_or_else(|| {
-            anyhow!("No eligible model — check that at least one model is enabled and your input fits its context window")
+            anyhow!("No eligible model — check that at least one model is enabled, reachable given your supplied BYOK keys, and your input fits its context window")
         })?;
 
         let reason = format!(
@@ -446,6 +476,7 @@ impl RouteEngine {
         &self,
         task: MeetingTask,
         input_tokens: u32,
+        reachable: Option<&HashSet<Provider>>,
     ) -> Result<RoutingDecision> {
         let (priority, preferred) = match task {
             MeetingTask::Summarise          => (RoutingPriority::Balanced, "claude-sonnet-5"),
@@ -455,17 +486,20 @@ impl RouteEngine {
             MeetingTask::Classify            => (RoutingPriority::Cost,     "gemini-3.1-flash-lite"),
         };
 
-        // Try the preferred model first (best UX for each task)
+        // Try the preferred model first (best UX for each task) — but only
+        // if it's actually reachable given the client's BYOK keys.
         if let Ok(m) = self.find(preferred) {
-            if m.enabled && input_tokens < m.context_window {
+            let is_reachable = reachable.map_or(true, |r| r.contains(&m.provider));
+            if m.enabled && is_reachable && input_tokens < m.context_window {
                 let reason = format!("{} chosen as task-optimal for {:?}", m.display_name, task);
                 info!("{}", reason);
                 return Ok(RoutingDecision { model: m, score: 1.0, reason });
             }
         }
 
-        // Preferred not available → fall back to score-based
-        self.select(input_tokens, 1024, priority)
+        // Preferred not available/reachable → fall back to score-based,
+        // still respecting the reachability filter.
+        self.select_reachable(input_tokens, 1024, priority, reachable)
     }
 
     // ===================================================================
@@ -503,13 +537,14 @@ impl RouteEngine {
     }
 
     pub fn select_provider(&self, model_name: &str) -> Result<Provider> {
-    self.find(model_name)
-        .map(|m| m.provider)
-        .map_err(|_| anyhow!(
-            "Unknown model '{}'. Check /v1/models for the list of supported model IDs.",
-            model_name
-        ))
-}
+        self.find(model_name)
+            .map(|m| m.provider)
+            .map_err(|_| anyhow!(
+                "Unknown model '{}'. Check /v1/models for the list of supported model IDs.",
+                model_name
+            ))
+    }
+
     pub fn get_pricing(&self, api_id: &str) -> Result<(f64, f64)> {
         let m = self.find(api_id)?;
         Ok((m.cost_per_1m_input, m.cost_per_1m_output))
@@ -539,6 +574,7 @@ impl RouteEngine {
         Ok(())
     }
 }
+
 pub fn openrouter_slug_override(direct_api_id: &str) -> Option<&'static str> {
     match direct_api_id {
         "gemini-3-flash" => Some("google/gemini-3-flash-preview"),
@@ -569,7 +605,6 @@ mod tests {
 
     #[test]
     fn overflow_model_excluded() {
-        // 150K tokens — must skip models with a <=128K window
         let e = RouteEngine::new();
         let d = e.select(150_000, 1_000, RoutingPriority::Balanced).unwrap();
         assert!(d.model.context_window >= 150_001);
@@ -578,7 +613,7 @@ mod tests {
     #[test]
     fn task_routing_extract_picks_deepseek() {
         let e = RouteEngine::new();
-        let d = e.select_for_task(MeetingTask::ExtractActionItems, 5_000).unwrap();
+        let d = e.select_for_task(MeetingTask::ExtractActionItems, 5_000, None).unwrap();
         assert_eq!(d.model.api_id, "deepseek-v4-flash");
     }
 
@@ -614,5 +649,32 @@ mod tests {
         assert!(e.is_vision_capable("gemini-3.1-pro"));
         assert!(!e.is_vision_capable("deepseek-v4-flash"));
         assert!(!e.is_vision_capable("grok-4.1-fast"));
+    }
+
+    #[test]
+    fn select_reachable_filters_by_provider() {
+        let e = RouteEngine::new();
+        let mut only_deepseek = HashSet::new();
+        only_deepseek.insert(Provider::DeepSeek);
+        let d = e.select_reachable(5_000, 1_000, RoutingPriority::Balanced, Some(&only_deepseek)).unwrap();
+        assert_eq!(d.model.provider, Provider::DeepSeek);
+    }
+
+    #[test]
+    fn select_reachable_errors_when_nothing_matches() {
+        let e = RouteEngine::new();
+        let empty = HashSet::new();
+        assert!(e.select_reachable(5_000, 1_000, RoutingPriority::Balanced, Some(&empty)).is_err());
+    }
+
+    #[test]
+    fn task_routing_falls_back_when_preferred_unreachable() {
+        let e = RouteEngine::new();
+        // claude-sonnet-5 (Summarise's preferred model) is Anthropic —
+        // restrict to DeepSeek only, forcing the scored fallback.
+        let mut only_deepseek = HashSet::new();
+        only_deepseek.insert(Provider::DeepSeek);
+        let d = e.select_for_task(MeetingTask::Summarise, 5_000, Some(&only_deepseek)).unwrap();
+        assert_eq!(d.model.provider, Provider::DeepSeek);
     }
 }

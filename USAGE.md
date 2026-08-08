@@ -69,7 +69,7 @@ The `model` field accepts three forms:
 
 - **A specific model ID** — e.g. `"claude-sonnet-5"`, `"gpt-5.6-sol"` — routes directly to that model/provider
 - **`"auto"`** — RouterFuel picks the best model for you based on cost, latency, and quality, balanced by default
-- **`"task:<name>"`** — routes based on task type, e.g. `"task:summarize"`, `"task:code"` — RouterFuel picks whichever registered model is best suited to that task
+- **`"task:<name>"`** — routes based on task type — RouterFuel picks whichever registered model is best suited to that task. Valid task names: `summarize` (or `summarise`), `answer_question` (or `qa`), `extract_action_items`, `draft_response` (or `draft`), `classify` — e.g. `"task:summarize"`, `"task:extract_action_items"`
 
 ### Sending images (vision)
 

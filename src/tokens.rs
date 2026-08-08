@@ -1,23 +1,32 @@
 // =============================================================================
-// src/tokens.rs  — RouterFuel v0.5
+// src/tokens.rs  — RouterFuel v0.6
 //
 // Precision token counting using OpenAI's tiktoken tokenizer (cl100k_base).
 // Used for:
 //   - Pre-request: count input tokens for routing score and cost estimation
 //   - Post-response: verify output tokens match what the API reported
 //   - Semantic cache: normalize prompt text for embedding
+//
+// FIX (this revision): count_tokens() used to treat a poisoned TOKENIZER
+// mutex as a permanent hard failure (`.lock().map_err(...)?`). Since this
+// is called on literally every chat-completion request (streaming and
+// non-streaming both call count_request_tokens), a single panic anywhere
+// inside tiktoken's encode_ordinary() for any one request would poison the
+// mutex forever and take down 100% of subsequent traffic with
+// InternalError until the process was restarted — a much bigger blast
+// radius than the equivalent bug already fixed in embedder.rs (which only
+// affected semantic caching). Recovers via `poisoned.into_inner()` instead,
+// same pattern as embedder.rs::embed().
 // =============================================================================
 
 use lazy_static::lazy_static;
 use std::sync::Mutex;
 use thiserror::Error;
 use tiktoken_rs::cl100k_base;
-use tracing::debug;
+use tracing::{debug, warn};
 
 #[derive(Error, Debug)]
 pub enum TokenError {
-    #[error("Tokenizer lock poisoned: {0}")]
-    LockPoisoned(String),
     #[error("Tokenizer encode failed: {0}")]
     EncodeFailed(String),
 }
@@ -34,11 +43,23 @@ lazy_static! {
 
 /// Count tokens in a plain string
 pub fn count_tokens(text: &str) -> Result<u32, TokenError> {
-    let tok = TOKENIZER.lock()
-        .map_err(|e| TokenError::LockPoisoned(e.to_string()))?;
+    // FIX: recover from a poisoned lock instead of permanently failing
+    // every future call. The underlying CoreBPE is still perfectly usable
+    // after one panicking call — only the lock's poison flag needs
+    // clearing, exactly like embedder.rs::embed()'s Mutex<Session>.
+    let tok = match TOKENIZER.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!(
+                "tokenizer mutex was poisoned by a previous panic — recovering and \
+                 continuing rather than permanently failing every request"
+            );
+            poisoned.into_inner()
+        }
+    };
 
     let tokens = tok.encode_ordinary(text);
-    
+
     let n = tokens.len() as u32;
     debug!(text_len = text.len(), token_count = n, "Counted tokens");
     Ok(n)
@@ -156,5 +177,16 @@ mod tests {
     #[test] fn estimate_defaults_by_model() {
         assert_eq!(estimate_output_tokens(None, "claude-opus-4-7"), 2048);
         assert_eq!(estimate_output_tokens(None, "gemini-3-flash"),  512);
+    }
+
+    #[test] fn survives_a_poisoned_lock() {
+        // Poison the mutex deliberately, then confirm count_tokens still
+        // works afterward instead of returning Err forever.
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = TOKENIZER.lock().unwrap();
+            panic!("deliberate poison for test");
+        });
+        let n = count_tokens("still works after a poison").unwrap();
+        assert!(n > 0);
     }
 }

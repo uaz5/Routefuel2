@@ -368,20 +368,29 @@ impl CostTracker {
     #[instrument(skip(self))]
     pub async fn get_daily_report(&self, date: &str) -> Result<DayAuditReport, CostTrackerError> {
         // Get summary stats
+       // FIX: the old query filtered `WHERE ... AND status = 'success'` on
+        // the base rows, which meant failed_requests (computed via a CASE
+        // over those same pre-filtered rows) was structurally always 0 and
+        // total_requests always equalled successful_requests. Token/cost/
+        // latency aggregates are intentionally still scoped to successful
+        // requests only (a failed call has no meaningful cost/latency to
+        // average in) via the CASE/FILTER conditions below, but the row
+        // set itself is no longer restricted, so total/failed counts are
+        // now real.
         let row = sqlx::query(
             r#"
             SELECT
                 DATE(created_at)::TEXT as date,
                 COUNT(*) as total_requests,
-                COUNT(CASE WHEN status = 'success' THEN 1 END) as successful_requests,
-                COUNT(CASE WHEN status != 'success' THEN 1 END) as failed_requests,
-                COALESCE(SUM(tokens_in), 0) as total_tokens_in,
-                COALESCE(SUM(tokens_out), 0) as total_tokens_out,
-                COALESCE(SUM(cost_cents), 0)::float8 as total_cost_cents,
-                COALESCE(SUM(cost_saved_cents), 0)::float8 as total_cost_saved_cents,
-                COALESCE(AVG(latency_ms), 0)::float8 as avg_latency_ms
+                COUNT(*) FILTER (WHERE status = 'success') as successful_requests,
+                COUNT(*) FILTER (WHERE status != 'success') as failed_requests,
+                COALESCE(SUM(tokens_in) FILTER (WHERE status = 'success'), 0) as total_tokens_in,
+                COALESCE(SUM(tokens_out) FILTER (WHERE status = 'success'), 0) as total_tokens_out,
+                COALESCE(SUM(cost_cents) FILTER (WHERE status = 'success'), 0)::float8 as total_cost_cents,
+                COALESCE(SUM(cost_saved_cents) FILTER (WHERE status = 'success'), 0)::float8 as total_cost_saved_cents,
+                COALESCE(AVG(latency_ms) FILTER (WHERE status = 'success'), 0)::float8 as avg_latency_ms
             FROM request_logs
-            WHERE DATE(created_at) = $1::DATE AND status = 'success'
+            WHERE DATE(created_at) = $1::DATE
             GROUP BY DATE(created_at)
             "#,
         )

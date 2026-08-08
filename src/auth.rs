@@ -405,7 +405,7 @@ pub async fn cursor_bridge_middleware(mut request: Request<Body>, next: Next) ->
         );
     };
 
-    let provider_header_name = match provider.to_lowercase().as_str() {
+   let provider_header_name = match provider.to_lowercase().as_str() {
         "openai"               => "x-openai-api-key",
         "anthropic"            => "x-anthropic-api-key",
         "deepseek"             => "x-deepseek-api-key",
@@ -417,12 +417,17 @@ pub async fn cursor_bridge_middleware(mut request: Request<Body>, next: Next) ->
         "zhipu" | "glm"        => "x-zhipu-api-key",
         "meta" | "llama"       => "x-meta-api-key",
         "openrouter"           => "x-openrouter-api-key",
-        other => {
-            return unauthorized_owned(format!(
-                "Unknown provider '{other}' in composite key. Expected one of: openai, \
-                 anthropic, deepseek, gemini, mistral, xai, qwen, moonshot, zhipu, meta, \
-                 openrouter."
-            ));
+        _ => {
+            // FIX: was Box::leak()-ing a formatted String per bad request —
+            // this middleware runs before auth/rate-limiting, so an
+            // unauthenticated caller could leak memory indefinitely by
+            // spamming an unrecognized provider name. Fixed message, no
+            // per-request allocation leaked, no echo of attacker input.
+            return unauthorized(
+                "Unknown provider in composite key. Expected one of: openai, anthropic, \
+                 deepseek, gemini, mistral, xai, qwen, moonshot, zhipu, meta, openrouter. \
+                 See /docs/cursor for the composite key format.",
+            );
         }
     };
 
@@ -449,7 +454,4 @@ pub async fn cursor_bridge_middleware(mut request: Request<Body>, next: Next) ->
 // is `&'static str`, so an owned String has to be leaked to fit it. This
 // only runs on a malformed-request error path, never in steady-state
 // traffic, so the leak is bounded by bad requests, not by legitimate load.
-fn unauthorized_owned(message: String) -> Response {
-    let leaked: &'static str = Box::leak(message.into_boxed_str());
-    unauthorized(leaked)
-}
+

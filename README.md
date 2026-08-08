@@ -8,10 +8,10 @@ RouterFuel never holds a billable key of its own. Every request is billed to *yo
 
 ## Features
 
-- **Smart routing** — pick a model by name, let RouterFuel auto-select on cost/latency/quality, or route by task type (`task:summarize`, `task:code`, etc.)
+- **Smart routing** — pick a model by name, let RouterFuel auto-select on cost/latency/quality, or route by task type (`task:summarize`, `task:extract_action_items`, `task:draft_response`, `task:answer_question`, `task:classify`)
 - **BYOK across 11 providers** — supply your own key per provider via request headers; OpenRouter acts as a universal fallback if that's the only key you have
 - **Vision support** — send images (URL or base64) to any vision-capable model in the registry
-- **Semantic caching** — a local ONNX embedding model (no external API cost) matches semantically similar prompts and serves cached responses instead of re-calling a provider
+- **Semantic caching** — a local ONNX embedding model (no external API cost) matches semantically similar prompts and serves cached responses instead of re-calling a provider. Cached entries are scoped per client — two different clients sending the same prompt never share a cache entry
 - **Cost tracking & audit trail** — every request is logged with token counts, cost, latency, and savings vs. a GPT-4o baseline
 - **Circuit breaker** — automatically stops sending traffic to a provider that's returning errors, and probes it back into rotation once it recovers
 - **Rate limiting & tiers** — per-client rate limits (free / pro / enterprise), configurable via env var or a Postgres table; tier changes take effect on the **next server restart** (tiers are loaded once at startup, not watched live)
@@ -33,7 +33,7 @@ RouterFuel never holds a billable key of its own. Every request is billed to *yo
 ```bash
 git clone https://github.com/uaz5/Routerfuel.git
 cd Routerfuel
-cp .env.example .env        # then fill in ROUTERFUEL_ADMIN_KEY at minimum
+cp env.example .env         # then fill in ROUTERFUEL_ADMIN_KEY at minimum
 ./scripts/generate-key.sh "MyFirstClient"   # copy the hash line into .env's ROUTERFUEL_API_KEYS
 docker compose up --build
 ```
@@ -56,7 +56,7 @@ cargo build --release
 
 **2. Set up the database**
 
-Create a Postgres database with the `vector` extension available, then run the migrations in `migrations/` in order (001 through 006). If you're using `sqlx-cli`:
+Create a Postgres database with the `vector` extension available, then run the migrations in `migrations/` in order (001 through 007). If you're using `sqlx-cli`:
 
 ```
 sqlx migrate run
@@ -114,7 +114,7 @@ src/
   circuit_breaker.rs        — per-provider health tracking
   concurrency.rs            — bounds in-flight provider calls
   guardrails.rs             — LoopGuard + SpendGuard
-  semantic_cache.rs         — pgvector-backed semantic cache
+  semantic_cache.rs         — pgvector-backed semantic cache, scoped per client
   embedder.rs               — local ONNX embedding model
   vision.rs                 — multimodal message types + per-provider image formatting
   tokens.rs                 — tiktoken-based token counting
@@ -125,12 +125,12 @@ src/
   openrouter_catalog.rs     — pulls OpenRouter's public model list into the registry
 static/
   dashboard.html            — self-contained admin dashboard UI, served at /admin/dashboard
-migrations/                — Postgres schema, run in numeric order
+migrations/                — Postgres schema, run in numeric order (001–007)
 scripts/
   generate-key.sh           — generates a client API key + its SHA-256 hash
 Dockerfile                  — multi-stage build (see Quickstart above)
 docker-compose.yml          — RouterFuel + Postgres/pgvector wired together
-.env.example                — copy to .env before `docker compose up`
+env.example                 — copy to .env before `docker compose up`
 ```
 
 ## License

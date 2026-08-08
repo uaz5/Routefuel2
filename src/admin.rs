@@ -34,6 +34,8 @@
 // what cost_tracker.rs has always written to) — fixed throughout.
 // =============================================================================
  
+use subtle::ConstantTimeEq;
+
 use axum::{
     extract::{Query, Request, State},
     http::StatusCode,
@@ -90,13 +92,24 @@ pub async fn admin_key_middleware(
         .get("x-admin-key")
         .and_then(|v| v.to_str().ok());
  
-    match supplied {
-        Some(k) if k == admin_key.as_str() => next.run(request).await,
-        _ => (
+    // FIX: was a plain `==` on the raw secret, which short-circuits on the
+    // first mismatching byte — a timing side channel on ROUTERFUEL_ADMIN_KEY.
+    // Compare in constant time instead, same spirit as auth.rs hashing
+    // client keys before lookup.
+    let matches = supplied
+        .map(|k| {
+            k.len() == admin_key.len() && k.as_bytes().ct_eq(admin_key.as_bytes()).into()
+        })
+        .unwrap_or(false);
+
+    if matches {
+        next.run(request).await
+    } else {
+        (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "Missing or invalid X-Admin-Key header" })),
         )
-            .into_response(),
+            .into_response()
     }
 }
  

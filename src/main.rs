@@ -606,6 +606,10 @@ async fn handle_non_streaming(
             // OpenRouter-fallback-rewritten requests could never hit the
             // cache on a repeat, since the resolved/echoed model rarely
             // matches what the client literally asked for.
+            //
+            // FIX: also scoped by rl_key now — see semantic_cache.rs. Two
+            // different clients hitting the byte-identical prompt+model no
+            // longer share a cache entry.
             state.semantic_cache.store(
                 rl_key.clone(),
                 prompt_text,
@@ -736,6 +740,25 @@ fn shadow_mode_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// FIX (this revision): the SpendGuard reservation for the shadow call now
+/// uses the SHADOW model's own estimated cost, not the primary model's.
+/// `shadow_model` is fully client-controlled — a client could pin a cheap
+/// primary model (e.g. claude-haiku-4-5) with an expensive shadow_model
+/// (e.g. claude-fable-5), and the old code reserved only the cheap primary
+/// amount before firing the (potentially 10x pricier) shadow call. That let
+/// concurrent primary+shadow pairs from the same client push real spend
+/// well past MAX_SPEND_CENTS_PER_CLIENT before reconcile() caught up after
+/// the fact — exactly the "stuck loop hammering an expensive model"
+/// scenario SpendGuard exists to catch.
+///
+/// Fixed by reordering: resolve the shadow model's provider and BYOK route
+/// FIRST (this touches no budget), then run the real tokenizer
+/// (tokens::count_request_tokens) on the actual outgoing shadow_request —
+/// not a char-count proxy off the primary response — price it with the
+/// shadow model's own rates via route_engine.get_pricing(&shadow_model_id),
+/// and reserve THAT amount before the call goes out. On completion,
+/// reconcile()/release() are called against the shadow reservation, not
+/// primary_cost_cents.
 #[allow(clippy::too_many_arguments)]
 fn maybe_fire_shadow_request(
     state: &AppState,
@@ -760,30 +783,10 @@ fn maybe_fire_shadow_request(
     let spend_key = client_id.clone().unwrap_or_else(|| "anonymous".to_string());
 
     tokio::spawn(async move {
-        if !spend_guard.try_reserve(&spend_key, primary_cost_cents) {
-            debug!(shadow_model = %shadow_model_id, "Shadow mode: client over spend cap, skipping shadow call");
-            cost_tracker.record_shadow_comparison(ShadowComparison {
-                request_id,
-                client_id,
-                primary_model,
-                primary_provider: primary_provider.to_string(),
-                primary_cost_cents,
-                primary_latency_ms,
-                primary_output_chars,
-                shadow_model: shadow_model_id,
-                shadow_provider: "skipped".to_string(),
-                shadow_cost_cents: None,
-                shadow_latency_ms: None,
-                shadow_output_chars: None,
-                shadow_error: Some("client over spend cap — shadow call skipped".to_string()),
-            });
-            return;
-        }
-
+        // Step 1: resolve the shadow model's provider. No budget touched yet.
         let shadow_provider = match route_engine.select_provider(&shadow_model_id) {
             Ok(p) => p,
             Err(e) => {
-                spend_guard.release(&spend_key, primary_cost_cents);
                 debug!(shadow_model = %shadow_model_id, "Shadow mode: unknown model ({e}), skipping");
                 cost_tracker.record_shadow_comparison(ShadowComparison {
                     request_id,
@@ -804,10 +807,13 @@ fn maybe_fire_shadow_request(
             }
         };
 
+        // Step 2: resolve the BYOK route for the shadow provider — also
+        // touches no budget, and tells us the exact model id string that
+        // will actually be sent (may differ from shadow_model_id if this
+        // falls back through OpenRouter).
         let byok_shadow = match resolve_byok_route(shadow_provider, &shadow_model_id, &provider_keys, &route_engine) {
             Ok(b) => b,
             Err(_) => {
-                spend_guard.release(&spend_key, primary_cost_cents);
                 debug!(shadow_model = %shadow_model_id, "Shadow mode: no BYOK key for shadow provider, skipping");
                 cost_tracker.record_shadow_comparison(ShadowComparison {
                     request_id,
@@ -832,6 +838,45 @@ fn maybe_fire_shadow_request(
         shadow_request.stream = Some(false);
         shadow_request.shadow_model = None;
 
+        // Step 3: real estimate — run the actual tokenizer on the real
+        // outgoing shadow_request (same messages as the primary call, since
+        // shadow mode sends an identical prompt), then price it with the
+        // shadow model's own rates. No char-count guessing.
+        let shadow_input_tokens = tokens::count_request_tokens(&shadow_request.messages, &shadow_request.model)
+            .unwrap_or(0);
+        let shadow_estimated_output = tokens::estimate_output_tokens(shadow_request.max_tokens, &shadow_request.model);
+        let (shadow_cost_in, shadow_cost_out) = route_engine
+            .get_pricing(&shadow_model_id)
+            .unwrap_or((500.0, 3000.0));
+        let shadow_estimated_cost_cents = TokenCostBreakdown::new(
+            shadow_input_tokens,
+            shadow_estimated_output,
+            shadow_cost_in,
+            shadow_cost_out,
+        ).total_cost_cents;
+
+        // Step 4: reserve against the SHADOW model's real estimate, not the
+        // primary's cost.
+        if !spend_guard.try_reserve(&spend_key, shadow_estimated_cost_cents) {
+            debug!(shadow_model = %shadow_model_id, "Shadow mode: client over spend cap, skipping shadow call");
+            cost_tracker.record_shadow_comparison(ShadowComparison {
+                request_id,
+                client_id,
+                primary_model,
+                primary_provider: primary_provider.to_string(),
+                primary_cost_cents,
+                primary_latency_ms,
+                primary_output_chars,
+                shadow_model: shadow_model_id,
+                shadow_provider: "skipped".to_string(),
+                shadow_cost_cents: None,
+                shadow_latency_ms: None,
+                shadow_output_chars: None,
+                shadow_error: Some("client over spend cap — shadow call skipped".to_string()),
+            });
+            return;
+        }
+
         let _permit = concurrency_limiter.acquire().await;
 
         let call_start = Instant::now();
@@ -842,14 +887,11 @@ fn maybe_fire_shadow_request(
 
         match result {
             Ok(connector_result) => {
-                let (cost_in, cost_out) = route_engine
-                    .get_pricing(&shadow_model_id)
-                    .unwrap_or((500.0, 3000.0));
                 let shadow_cost = TokenCostBreakdown::new(
                     connector_result.input_tokens,
                     connector_result.output_tokens,
-                    cost_in,
-                    cost_out,
+                    shadow_cost_in,
+                    shadow_cost_out,
                 );
                 let output_chars = connector_result
                     .response
@@ -858,7 +900,9 @@ fn maybe_fire_shadow_request(
                     .map(|c| c.message.content.as_text().len())
                     .unwrap_or(0);
 
-                spend_guard.reconcile(&spend_key, primary_cost_cents, shadow_cost.total_cost_cents);
+                // Reconcile against what was actually reserved (the shadow
+                // estimate), not the primary's cost.
+                spend_guard.reconcile(&spend_key, shadow_estimated_cost_cents, shadow_cost.total_cost_cents);
 
                 debug!(
                     shadow_model = %shadow_model_id,
@@ -884,7 +928,9 @@ fn maybe_fire_shadow_request(
                 });
             }
             Err(e) => {
-                spend_guard.release(&spend_key, primary_cost_cents);
+                // The call never landed — release the full reservation
+                // (equivalent to reconciling down to 0 actual cost).
+                spend_guard.release(&spend_key, shadow_estimated_cost_cents);
                 cost_tracker.record_shadow_comparison(ShadowComparison {
                     request_id,
                     client_id,
@@ -1098,9 +1144,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         telemetry,
         concurrency_limiter,
     };
-    
 
-    
+
+
     let protected_routes = Router::new()
         .route("/v1/chat/completions", post(chat_completions_handler))
         .with_state(state.clone())

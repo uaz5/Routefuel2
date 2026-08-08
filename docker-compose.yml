@@ -41,7 +41,7 @@ services:
       HOST: 0.0.0.0
       PORT: 3000
 
-      # See .env.example — copy it to .env and fill these in before running.
+      # See env.example — copy it to .env and fill these in before running.
       ROUTERFUEL_API_KEYS: ${ROUTERFUEL_API_KEYS:-}
       ROUTERFUEL_CLIENT_TIERS: ${ROUTERFUEL_CLIENT_TIERS:-}
       ROUTERFUEL_ADMIN_KEY: ${ROUTERFUEL_ADMIN_KEY:-}
